@@ -2,7 +2,7 @@
 // incrementa o PATCH, compila o instalador assinado, gera latest.json e cria a release.
 // A chave de assinatura fica fora do repositório, em ~/.tauri/painel-agentes.key.
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -31,7 +31,8 @@ const latest = {
   platforms: { 'windows-x86_64': { signature: sig, url: `https://github.com/${REPO}/releases/download/v${version}/${asset}` } },
 }
 writeFileSync(join(dir, 'latest.json'), JSON.stringify(latest, null, 2))
+copyFileSync(join(dir, exe), join(dir, asset))
 
-run('gh', ['release', 'create', `v${version}`, `${join(dir, exe)}#${asset}`, join(dir, 'latest.json'),
+run('gh', ['release', 'create', `v${version}`, join(dir, asset), join(dir, 'latest.json'),
   '--repo', REPO, '--title', `v${version}`, '--notes', `Painel Agentes v${version}`])
 console.log(`Publicada v${version}`)
