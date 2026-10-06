@@ -106,6 +106,11 @@ fn claude_seeds(since: i64, archived: bool) -> Vec<Seed> {
                 if !name.starts_with("local_") || !name.ends_with(".json") {
                     continue;
                 }
+                // O arquivo é regravado a cada atividade: se não muda desde antes do período, nem precisa ser lido.
+                let modified = e.metadata().and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(UNIX_EPOCH).ok());
+                if modified.is_some_and(|m| (m.as_millis() as i64) < since) {
+                    continue;
+                }
                 let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
                 let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
                 let updated = v.get("lastActivityAt").and_then(Value::as_i64).unwrap_or(0);
@@ -279,14 +284,11 @@ impl Ctx {
             return hit.clone();
         }
         let info = (|| {
-            let out = git(dir, &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "--abbrev-ref", "HEAD"])?;
-            let mut l = out.lines();
-            let (top, common, head) = (l.next()?.to_string(), l.next()?, l.next().unwrap_or("HEAD"));
-            let main_repo = Path::new(common).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or(top.clone());
+            let loc = locate(dir)?;
             Some(DirInfo {
-                top,
-                main_repo,
-                head: (head != "HEAD").then(|| head.to_string()),
+                head: head_branch(&loc.git_dir),
+                top: loc.top,
+                main_repo: loc.main_repo,
                 dirty: git(dir, &["status", "--porcelain"]).map(|s| s.lines().count() as u32).unwrap_or(0),
             })
         })();
@@ -307,6 +309,36 @@ impl Ctx {
         self.refs.lock().unwrap().insert(repo.to_string(), map.clone());
         map
     }
+}
+
+#[derive(Clone)]
+struct Loc {
+    top: String,
+    main_repo: String,
+    git_dir: String,
+}
+
+/// Onde fica o repositório de cada pasta. Não muda enquanto a pasta existir, então o `rev-parse`
+/// (um processo git, caro no Windows) roda uma vez por pasta, não a cada atualização.
+static LOCS: std::sync::LazyLock<Mutex<HashMap<String, Loc>>> = std::sync::LazyLock::new(Default::default);
+
+fn locate(dir: &str) -> Option<Loc> {
+    if let Some(hit) = LOCS.lock().unwrap().get(dir).filter(|l| Path::new(&l.git_dir).is_dir()) {
+        return Some(hit.clone());
+    }
+    let out = git(dir, &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "--git-dir"])?;
+    let mut l = out.lines();
+    let (top, common, git_dir) = (l.next()?.to_string(), l.next()?, l.next()?.to_string());
+    let main_repo = Path::new(common).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or(top.clone());
+    let loc = Loc { top, main_repo, git_dir };
+    LOCS.lock().unwrap().insert(dir.to_string(), loc.clone());
+    Some(loc)
+}
+
+/// Branch atual lida direto do arquivo HEAD (sem processo git). `None` quando está em detached HEAD.
+fn head_branch(git_dir: &str) -> Option<String> {
+    let text = std::fs::read_to_string(Path::new(git_dir).join("HEAD")).ok()?;
+    text.trim().strip_prefix("ref: refs/heads/").map(String::from)
 }
 
 fn git_info(seed: &Seed, ctx: &Ctx) -> Option<GitInfo> {
@@ -352,7 +384,12 @@ fn git_info(seed: &Seed, ctx: &Ctx) -> Option<GitInfo> {
         return Some(GitInfo { dirty: g.dirty, worktree_missing: g.worktree_missing, ..hit.clone() });
     }
     let g = expensive(dir, seed, g);
-    CACHE.lock().unwrap().insert(key, g.clone());
+    let mut cache = CACHE.lock().unwrap();
+    // Chaves antigas (pontas de branch que já mudaram) não voltam a ser usadas: limpa para não crescer sem fim.
+    if cache.len() > 2000 {
+        cache.clear();
+    }
+    cache.insert(key, g.clone());
     Some(g)
 }
 
@@ -524,9 +561,28 @@ fn pending_now() -> Vec<pending::Pending> {
     items
 }
 
+/// Última varredura de pendências: a tela, os refreshes e o aviso do Windows dividem o mesmo resultado.
+/// O lock fica preso durante a varredura, então chamadas simultâneas esperam e reaproveitam em vez de repetir o trabalho.
+static PENDING: Mutex<Option<(i64, Vec<pending::Pending>)>> = Mutex::new(None);
+const PENDING_TTL_MS: i64 = 2 * 60_000;
+
+fn pending_cached(max_age_ms: i64) -> Vec<pending::Pending> {
+    let mut slot = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, items)) = slot.as_ref() {
+        if now_ms() - at < max_age_ms {
+            return items.clone();
+        }
+    }
+    let items = pending_now();
+    *slot = Some((now_ms(), items.clone()));
+    items
+}
+
 #[tauri::command]
 async fn remove_worktree(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || pending::remove_worktree(&path)).await.map_err(|e| e.to_string())?
+    let res = tauri::async_runtime::spawn_blocking(move || pending::remove_worktree(&path)).await.map_err(|e| e.to_string())?;
+    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    res
 }
 
 /// Abre a pasta no VS Code (instalação do usuário ou do sistema).
@@ -548,8 +604,9 @@ fn open_editor(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn list_pending() -> Result<Vec<pending::Pending>, String> {
-    tauri::async_runtime::spawn_blocking(pending_now).await.map_err(|e| e.to_string())
+async fn list_pending(fresh: Option<bool>) -> Result<Vec<pending::Pending>, String> {
+    let max_age = if fresh.unwrap_or(false) { 0 } else { PENDING_TTL_MS };
+    tauri::async_runtime::spawn_blocking(move || pending_cached(max_age)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -625,7 +682,7 @@ fn watcher(app: tauri::AppHandle) {
         let file = app.path().app_data_dir().ok().map(|d| d.join("avisos.json"));
         std::thread::sleep(std::time::Duration::from_secs(90));
         loop {
-            let items = pending_now();
+            let items = pending_cached(PENDING_TTL_MS);
             let now = now_ms();
             let mut sent: HashMap<String, i64> = file
                 .as_ref()

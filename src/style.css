@@ -215,8 +215,10 @@ select {
 .stats { display: inline-flex; gap: 6px; font-variant-numeric: tabular-nums; }
 .stats .add { color: var(--merged); font-weight: 700; }
 .stats .del { color: var(--danger); font-weight: 700; }
-.live { width: 8px; height: 8px; border-radius: 50%; background: var(--merged); flex: none; animation: pulse 1.8s infinite; box-shadow: 0 0 0 0 var(--merged); }
-@keyframes pulse { 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+/* Pulso com transform/opacity num pseudo-elemento: roda no compositor, sem repintar a linha a cada quadro. */
+.live { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--merged); flex: none; }
+.live::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--merged); animation: pulse 1.8s infinite; will-change: transform, opacity; }
+@keyframes pulse { from { transform: scale(1); opacity: .6; } 70%, to { transform: scale(2.5); opacity: 0; } }
 
 .trow.head .lbl { padding-left: 16px; }
 .proj-lbl { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; padding-right: 44px; }
@@ -244,7 +246,8 @@ select {
 .lane circle.on-main { fill: var(--c); stroke: var(--bt-color-surface); stroke-width: 2; }
 .lane circle.ring { fill: var(--bt-color-surface); stroke: var(--c); stroke-width: 3; }
 .lane rect.flag { fill: var(--c); }
-.lane.live path.lane-line { stroke-dasharray: 6 4; animation: flow 1s linear infinite; }
+/* O traço andando repinta o SVG inteiro: 10 passos por segundo bastam para o movimento e custam ~6x menos que 60 fps. */
+.lane.live path.lane-line { stroke-dasharray: 6 4; animation: flow 1s steps(10) infinite; }
 @keyframes flow { to { stroke-dashoffset: -10; } }
 .lane.hl path.lane-line { stroke-width: 5; }
 

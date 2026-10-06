@@ -5,7 +5,13 @@ use crate::{git, git_ok, same_path, Ctx};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
+
+/// `unmerged` só depende das pontas da base e da branch: com o mesmo par de commits, a resposta é a mesma.
+static UNMERGED: LazyLock<Mutex<HashMap<String, (u32, Vec<String>)>>> = LazyLock::new(Default::default);
+/// Pasta -> repositório principal (não muda enquanto a pasta existir).
+static REPO_OF: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 
 /// Branches sem worktree só contam se tiveram commit nos últimos dias (evita branches antigas abandonadas).
 const BRANCH_MAX_AGE_DAYS: i64 = 30;
@@ -38,18 +44,33 @@ struct Ref {
     track: String,
 }
 
-fn refs(dir: &str) -> HashMap<String, Ref> {
-    git(dir, &["for-each-ref", "--format=%(refname:short)%09%(objectname)%09%(committerdate:unix)%09%(upstream:short)%09%(upstream:track)", "refs/heads"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let mut p = l.split('\t');
-            Some((
-                p.next()?.to_string(),
-                Ref { tip: p.next()?.to_string(), time: p.next()?.parse::<i64>().unwrap_or(0) * 1000, upstream: p.next().unwrap_or("").to_string(), track: p.next().unwrap_or("").to_string() },
-            ))
-        })
-        .collect()
+struct Refs {
+    heads: HashMap<String, Ref>,
+    /// Pontas das branches remotas (ex.: `origin/main`).
+    remotes: HashMap<String, String>,
+    /// Branch padrão do GitHub (`origin/HEAD`), sem o prefixo `origin/`.
+    origin_head: Option<String>,
+}
+
+/// Branches locais e remotas num único `for-each-ref` (antes eram também `symbolic-ref` e `git remote`).
+fn refs(dir: &str) -> Refs {
+    let fmt = "--format=%(refname)%09%(objectname)%09%(committerdate:unix)%09%(upstream:short)%09%(upstream:track)%09%(symref)";
+    let out = git(dir, &["for-each-ref", fmt, "refs/heads", "refs/remotes"]).unwrap_or_default();
+    let mut r = Refs { heads: HashMap::new(), remotes: HashMap::new(), origin_head: None };
+    for l in out.lines() {
+        let mut p = l.split('\t');
+        let (Some(name), Some(tip)) = (p.next(), p.next()) else { continue };
+        let time = p.next().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000;
+        let (upstream, track, symref) = (p.next().unwrap_or(""), p.next().unwrap_or(""), p.next().unwrap_or(""));
+        if let Some(b) = name.strip_prefix("refs/heads/") {
+            r.heads.insert(b.to_string(), Ref { tip: tip.to_string(), time, upstream: upstream.to_string(), track: track.to_string() });
+        } else if name == "refs/remotes/origin/HEAD" {
+            r.origin_head = symref.strip_prefix("refs/remotes/origin/").map(String::from);
+        } else if let Some(b) = name.strip_prefix("refs/remotes/") {
+            r.remotes.insert(b.to_string(), tip.to_string());
+        }
+    }
+    r
 }
 
 fn track_ahead(track: &str) -> u32 {
@@ -59,16 +80,33 @@ fn track_ahead(track: &str) -> u32 {
         .unwrap_or(0)
 }
 
-fn base_of(dir: &str, refs: &HashMap<String, Ref>) -> Option<String> {
-    let remote_head = git(dir, &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
-        .and_then(|s| s.strip_prefix("origin/").map(String::from));
-    remote_head
+fn base_of(r: &Refs) -> Option<String> {
+    let refs = &r.heads;
+    r.origin_head
+        .clone()
         .filter(|b| refs.contains_key(b))
         .or_else(|| ["main", "master", "develop"].iter().find(|b| refs.contains_key(**b)).map(|b| b.to_string()))
 }
 
-fn commit_time(dir: &str, rev: &str) -> i64 {
-    git(dir, &["log", "-1", "--format=%ct", rev]).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0) * 1000
+/// Data do último commit da branch, já lida pelo `for-each-ref` (sem outro processo git).
+fn tip_time(refs: &HashMap<String, Ref>, branch: &str) -> i64 {
+    refs.get(branch).map(|r| r.time).unwrap_or(0)
+}
+
+/// `unmerged` com cache pelas pontas dos commits; sem as pontas, calcula direto.
+fn unmerged_cached(dir: &str, refs: &HashMap<String, Ref>, base: &str, branch: &str) -> (u32, Vec<String>) {
+    let (Some(b), Some(t)) = (refs.get(base), refs.get(branch)) else { return unmerged(dir, base, branch) };
+    let key = format!("{}|{}", b.tip, t.tip);
+    if let Some(hit) = UNMERGED.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    let res = unmerged(dir, base, branch);
+    let mut cache = UNMERGED.lock().unwrap();
+    if cache.len() > 2000 {
+        cache.clear();
+    }
+    cache.insert(key, res.clone());
+    res
 }
 
 /// Commits da branch que ainda não estão na base. Zero se já foi mesclada, inclusive por squash.
@@ -147,11 +185,35 @@ fn worktrees(dir: &str) -> Vec<Wt> {
     list
 }
 
+/// Commits da base ainda não enviados ao GitHub, com cache pelas pontas local e remota.
+fn unpushed(repo: &str, base: &str, r: &Ref, remote_tip: Option<&String>) -> (u32, Vec<String>) {
+    let key = format!("push|{}|{}|{}", r.tip, remote_tip.map(String::as_str).unwrap_or(""), r.track);
+    if let Some(hit) = UNMERGED.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    let range = format!("origin/{base}..{base}");
+    let ahead = if !r.upstream.is_empty() {
+        track_ahead(&r.track)
+    } else if remote_tip.is_some() {
+        git(repo, &["rev-list", "--count", &range]).and_then(|s| s.parse().ok()).unwrap_or(0)
+    } else {
+        0
+    };
+    let commits = if ahead > 0 {
+        git(repo, &["log", &range, "-n", "5", "--format=%s"]).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()
+    } else {
+        vec![]
+    };
+    UNMERGED.lock().unwrap().insert(key, (ahead, commits.clone()));
+    (ahead, commits)
+}
+
 fn scan_repo(repo: &str, now: i64) -> Vec<Pending> {
-    let refs = refs(repo);
-    let Some(base) = base_of(repo, &refs) else { return vec![] };
+    let all = refs(repo);
+    let Some(base) = base_of(&all) else { return vec![] };
+    let refs = &all.heads;
     let project = Path::new(repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let has_remote = git(repo, &["remote"]).map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let has_remote = !all.remotes.is_empty();
     let mut out = vec![];
     let item = |kind: &'static str, path: &str, branch: &str, count: u32, last: i64, commits: Vec<String>, worktree: bool| Pending {
         key: format!("{kind}|{}|{branch}", path.to_lowercase()),
@@ -173,16 +235,9 @@ fn scan_repo(repo: &str, now: i64) -> Vec<Pending> {
     // Base mesclada mas não enviada ao GitHub.
     if has_remote {
         if let Some(r) = refs.get(&base) {
-            let ahead = if r.upstream.is_empty() {
-                git(repo, &["rev-list", "--count", &format!("origin/{base}..{base}")]).and_then(|s| s.parse().ok()).unwrap_or(0)
-            } else {
-                track_ahead(&r.track)
-            };
+            let (ahead, commits) = unpushed(repo, &base, r, all.remotes.get(&format!("origin/{base}")));
             if ahead > 0 {
-                let commits = git(repo, &["log", &format!("origin/{base}..{base}"), "-n", "5", "--format=%s"])
-                    .map(|s| s.lines().map(String::from).collect())
-                    .unwrap_or_default();
-                out.push(item("unpushed", repo, &base, ahead, commit_time(repo, &base), commits, false));
+                out.push(item("unpushed", repo, &base, ahead, tip_time(refs, &base), commits, false));
             }
         }
     }
@@ -200,16 +255,16 @@ fn scan_repo(repo: &str, now: i64) -> Vec<Pending> {
         if b == base {
             continue;
         }
-        let (ahead, commits) = unmerged(&wt.path, &base, &b);
+        let (ahead, commits) = unmerged_cached(&wt.path, refs, &base, &b);
         if ahead > 0 {
-            out.push(item("unmerged", &wt.path, &b, ahead, commit_time(&wt.path, &b), commits, !is_main));
+            out.push(item("unmerged", &wt.path, &b, ahead, tip_time(refs, &b), commits, !is_main));
         } else if n == 0 && !is_main {
-            out.push(item("cleanup", &wt.path, &b, 0, commit_time(&wt.path, &b), vec![], true));
+            out.push(item("cleanup", &wt.path, &b, 0, tip_time(refs, &b), vec![], true));
         }
     }
 
     // Branches sem worktree com commits recentes que nunca chegaram à base.
-    for (b, r) in &refs {
+    for (b, r) in refs {
         if *b == base || with_worktree.contains(b) || r.tip.is_empty() {
             continue;
         }
@@ -217,7 +272,7 @@ fn scan_repo(repo: &str, now: i64) -> Vec<Pending> {
         if now - last > BRANCH_MAX_AGE_DAYS * 86_400_000 {
             continue;
         }
-        let (ahead, commits) = unmerged(repo, &base, b);
+        let (ahead, commits) = unmerged_cached(repo, refs, &base, b);
         if ahead > 0 {
             out.push(item("unmerged", repo, b, ahead, last, commits, false));
         }
@@ -249,9 +304,18 @@ pub fn repos(ctx: &Ctx, chat_dirs: &[String]) -> Vec<String> {
         if d.is_empty() || !seen_dir.insert(d.to_lowercase()) || !Path::new(&d).is_dir() {
             continue;
         }
-        let Some(common) = git(&d, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) else { continue };
-        let Some(repo) = Path::new(&common).parent().map(|p| p.to_string_lossy().replace('/', "\\")) else { continue };
-        if seen.insert(repo.to_lowercase()) {
+        let key = d.to_lowercase();
+        let known = REPO_OF.lock().unwrap().get(&key).cloned();
+        let repo = match known {
+            Some(r) => r,
+            None => {
+                let Some(common) = git(&d, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) else { continue };
+                let Some(r) = Path::new(&common).parent().map(|p| p.to_string_lossy().replace('/', "\\")) else { continue };
+                REPO_OF.lock().unwrap().insert(key, r.clone());
+                r
+            }
+        };
+        if seen.insert(repo.to_lowercase()) && Path::new(&repo).is_dir() {
             out.push(repo);
         }
     }
@@ -293,7 +357,7 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
     if dirty(path).0 > 0 {
         return Err("O worktree tem arquivos não commitados".into());
     }
-    let base = base_of(&repo, &refs(&repo)).ok_or("Branch base não encontrada")?;
+    let base = base_of(&refs(&repo)).ok_or("Branch base não encontrada")?;
     if branch == base || unmerged(path, &base, &branch).0 > 0 {
         return Err(format!("A branch {branch} ainda tem commits fora da {base}"));
     }

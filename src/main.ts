@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 declare const __APP_VERSION__: string
 declare const __BUILD_DATE__: string
@@ -32,6 +33,8 @@ const ACTIVE_MS = 10 * 60_000
 // Pendência parada há mais que isso aparece como esquecida (e gera aviso do Windows).
 const STALE_MS = 86_400_000
 const REFRESH_MS = 45_000
+// A varredura de pendências (todos os repositórios) é cara: refaz no máximo a cada 2 min, salvo no F5.
+const PENDING_MS = 2 * 60_000
 // Pedidos parados há mais que isso deixam de contar como "Precisa de você" (o agente já foi deixado de lado).
 const NEED_MS = 3 * 86_400_000
 const IN_TAURI = '__TAURI_INTERNALS__' in window
@@ -76,6 +79,7 @@ let cleanups: Pending[] = []
 let unpushedBy = new Map<string, Pending>()
 let loading = false
 let lastLoad = 0
+let lastPending = 0
 
 function persist() {
   try { localStorage.setItem('filters', JSON.stringify({ focus: ui.focus, agent: ui.agent, project: ui.project, days: ui.days, archived: ui.archived })) } catch { /* sem armazenamento */ }
@@ -151,7 +155,16 @@ const pendSince = (r: Run) => Math.min(...(r.pend ?? []).map((p) => p.lastActivi
 
 type Status = 'need' | 'open' | 'merged' | 'main' | 'idle'
 
+// Memo por renderização: o mesmo chat é classificado várias vezes (contagens, ordenação, grafo, rótulo).
+let statusMemo = new WeakMap<Run, Status>()
+
 function statusOf(r: Run): Status {
+  let s = statusMemo.get(r)
+  if (!s) statusMemo.set(r, (s = computeStatus(r)))
+  return s
+}
+
+function computeStatus(r: Run): Status {
   const g = r.git
   if (r.needsAction && !r.archived && Date.now() - r.updatedAt < NEED_MS) return 'need'
   if (r.pend?.length) return 'open'
@@ -419,7 +432,9 @@ function collapse(list: Run[]) {
   for (const r of list) {
     if (!r.git || r.orphan || statusOf(r) === 'need') { out.push(r); continue }
     const k = `${np(r.git.repoRoot)}|${r.git.branch}|${np(r.cwd)}|${statusOf(r)}`
-    groups.set(k, [...(groups.get(k) ?? []), r])
+    const g = groups.get(k)
+    if (g) g.push(r)
+    else groups.set(k, [r])
   }
   for (const g of groups.values()) {
     if (g.length === 1) { out.push(g[0]); continue }
@@ -433,6 +448,7 @@ let width = 0
 const byId = new Map<string, Run>()
 
 function render() {
+  statusMemo = new WeakMap()
   // 26px de padding de cada lado mais 1px de borda do painel em cada lado.
   width = Math.max(320, board.clientWidth - LABEL_W - 54)
   if (!lastLoad) {
@@ -450,7 +466,12 @@ function render() {
   const from = to - ui.days * 86_400_000
 
   const groups = new Map<string, Run[]>()
-  for (const r of list) groups.set(projectOf(r), [...(groups.get(projectOf(r)) ?? []), r])
+  for (const r of list) {
+    const name = projectOf(r)
+    const g = groups.get(name)
+    if (g) g.push(r)
+    else groups.set(name, [r])
+  }
   // Push pendente na base também é trabalho por integrar, mesmo sem chat no período.
   if (ui.focus === 'pending' || ui.focus === 'open' || ui.focus === 'all') {
     const q = ui.q.trim().toLowerCase()
@@ -526,13 +547,20 @@ function hover(id: string, ev?: MouseEvent) {
     tip.style.transform = `translate(${left}px, ${top}px)`
   }
 }
+// Um cálculo de dica por quadro, mesmo com o mouse disparando vários eventos entre eles.
+let moveEv: MouseEvent | null = null
 board.addEventListener('mousemove', (ev) => {
-  const t = ev.target as Element
-  // Sobre o botão de ações a dica atrapalha a leitura do menu.
-  const el = t.closest('[data-more]') || ctx.classList.contains('show') ? null : t.closest<HTMLElement | SVGElement>('[data-id]')
-  hover(el?.dataset.id ?? '', ev as MouseEvent)
+  if (!moveEv) requestAnimationFrame(() => {
+    const e = moveEv!
+    moveEv = null
+    const t = e.target as Element
+    // Sobre o botão de ações a dica atrapalha a leitura do menu.
+    const el = t.closest('[data-more]') || ctx.classList.contains('show') ? null : t.closest<HTMLElement | SVGElement>('[data-id]')
+    hover(el?.dataset.id ?? '', e)
+  })
+  moveEv = ev
 })
-board.addEventListener('mouseleave', () => hover(''))
+board.addEventListener('mouseleave', () => { moveEv = null; hover('') })
 board.addEventListener('scroll', () => { hover(''); closeMenu() })
 new ResizeObserver(() => { if (Math.abs(board.clientWidth - LABEL_W - 54 - width) > 4) render() }).observe(board)
 
@@ -558,7 +586,7 @@ async function load(manual = false) {
     link()
     renderProjects()
     render()
-    void loadPending()
+    if (manual || Date.now() - lastPending > PENDING_MS) void loadPending(manual)
     if (manual) toast('Atualizado')
   } catch (e) {
     toast(`Não consegui ler os chats: ${e}`, true)
@@ -568,10 +596,11 @@ async function load(manual = false) {
   }
 }
 
-async function loadPending() {
+async function loadPending(fresh = false) {
+  lastPending = Date.now()
   try {
     pendings = IN_TAURI
-      ? await invoke<Pending[]>('list_pending')
+      ? await invoke<Pending[]>('list_pending', { fresh })
       : await fetch('/mock-pending.json').then((r) => r.json())
     link()
     renderProjects()
@@ -757,7 +786,7 @@ async function removeAll(list: Pending[]) {
   }
   removing = false
   const done = list.length - fails.length
-  void loadPending()
+  void loadPending(true)
   if (!fails.length) {
     modal.hidden = true
     toast(`${plural(done, 'worktree removida', 'worktrees removidas')}`)
@@ -824,7 +853,13 @@ board.addEventListener('keydown', (ev) => {
   }
 })
 
-qInput.addEventListener('input', () => { ui.q = qInput.value; render() })
+// Digitação rápida redesenha uma vez por quadro, não a cada tecla.
+let typing = 0
+qInput.addEventListener('input', () => {
+  ui.q = qInput.value
+  cancelAnimationFrame(typing)
+  typing = requestAnimationFrame(() => render())
+})
 function syncAgent() {
   document.querySelectorAll<HTMLButtonElement>('#agent button').forEach((x) => {
     x.classList.toggle('on', x.dataset.v === ui.agent)
@@ -884,6 +919,13 @@ autoChk.addEventListener('change', async () => {
     toast(autoChk.checked ? 'O painel vai iniciar com o Windows, na bandeja' : 'Não inicia mais com o Windows')
   } catch (e) { autoChk.checked = !autoChk.checked; toast(String(e), true) }
 })
+/** Janela na bandeja ou minimizada não precisa atualizar a tela (o aviso do Windows segue pelo backend). */
+const appWin = IN_TAURI ? getCurrentWindow() : null
+async function onScreen() {
+  if (document.hidden) return false
+  if (!appWin) return true
+  try { return (await appWin.isVisible()) && !(await appWin.isMinimized()) } catch { return true }
+}
 window.addEventListener('focus', () => { if (Date.now() - lastLoad > 10_000) void load() })
 document.addEventListener('keydown', (ev) => {
   if ((ev.ctrlKey && ev.key.toLowerCase() === 'f') || (ev.key === '/' && document.activeElement !== qInput)) {
@@ -891,8 +933,8 @@ document.addEventListener('keydown', (ev) => {
   }
   if (ev.key === 'F5') { ev.preventDefault(); void load(true) }
 })
-setInterval(() => { if (!document.hidden) void load() }, REFRESH_MS)
-setInterval(() => { if (lastLoad && !ctx.classList.contains('show')) render() }, 30_000)
+setInterval(async () => { if (await onScreen()) void load() }, REFRESH_MS)
+setInterval(async () => { if (lastLoad && !ctx.classList.contains('show') && (await onScreen())) render() }, 30_000)
 
 $<HTMLElement>('version').textContent = `v${__APP_VERSION__} · ${__BUILD_DATE__}`
 render()
