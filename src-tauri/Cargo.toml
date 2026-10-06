@@ -23,6 +23,5 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 
 [profile.release]
 opt-level = "s"
-lto = true
-codegen-units = 1
+lto = "thin"
 strip = true
