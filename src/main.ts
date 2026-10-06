@@ -16,6 +16,8 @@ type Run = {
   id: string; agent: Agent; title: string; cwd: string; createdAt: number; updatedAt: number
   archived: boolean; state: string | null; detail: string | null; needsAction: string | null
   prs: Pr[]; git: GitInfo | null; openUrl: string
+  /** `git` é o último estado conhecido; o backend ainda está reverificando esta pasta. */
+  stale: boolean
   /** Pendências do Git ligadas a este chat (mesma branch e repositório). */
   pend?: Pending[]
   /** Linha montada a partir de uma pendência sem chat no período (não veio de list_runs). */
@@ -117,7 +119,7 @@ function pendAsRun(p: Pending): Run {
   return {
     id: `p:${np(p.path)}|${p.branch}`, agent: p.chatAgent ?? 'git', title: p.chatTitle ?? 'Nenhum chat ligado', cwd: p.path,
     createdAt: 0, updatedAt: p.lastActivity || Date.now(), archived: false, state: null, detail: null, needsAction: null,
-    prs: [], openUrl: p.chatUrl ?? '', orphan: true, pend: [],
+    prs: [], openUrl: p.chatUrl ?? '', orphan: true, pend: [], stale: false,
     git: {
       project: p.project, repoRoot: p.repoRoot, branch: p.branch, base: p.base, onBase: p.branch === p.base, branchExists: true,
       worktree: p.worktree, worktreeMissing: false, ahead: 0, behind: 0, merged: false, commits: [], commitCount: 0,
@@ -277,6 +279,7 @@ function label(r: Run, s: Status) {
     <div class="lbl-top">
       <span class="br" title="${esc(r.git?.branch ?? '')}">${esc(r.git?.branch ?? 'Sem repositório')}</span>
       <span class="badge">${esc(badgeText(r, s))}</span>
+      ${r.stale ? '<i class="verifying" title="Reverificando o Git"></i>' : ''}
       ${live ? '<i class="live" title="Ativo agora"></i>' : ''}
       ${r.others?.length ? `<span class="n-chats" title="${esc(plural(r.others.length + 1, 'chat', 'chats'))} nesta branch">${r.others.length + 1} chats</span>` : ''}
     </div>
@@ -386,7 +389,7 @@ function project(name: string, list: Run[], from: number, to: number, width: num
 
   const rowsHtml = rows.map((r) => {
     const s = statusOf(r)
-    return `<div class="trow${r.archived ? ' archived' : ''}" data-id="${esc(r.id)}" tabindex="0" role="button"
+    return `<div class="trow${r.archived ? ' archived' : ''}${r.stale ? ' stale' : ''}" data-id="${esc(r.id)}" tabindex="0" role="button"
       aria-label="${esc(`${r.git?.branch ?? ''} ${badgeText(r, s)}: ${r.title}`)}">${label(r, s)}<div class="tgraph"></div></div>`
   }).join('')
 
@@ -510,11 +513,13 @@ function render() {
   const need = st.filter((s) => s === 'need').length
   const open = st.filter((s) => s === 'open').length
   const live = all.filter((r) => !r.orphan && Date.now() - r.updatedAt < ACTIVE_MS).length
+  const verifying = all.filter((r) => r.stale).length
   const parts = [
     need ? `<b class="s-need">${need} ${need === 1 ? 'precisa' : 'precisam'} de você</b>` : '',
     open ? `<b class="s-open">${open} ${open === 1 ? 'falta' : 'faltam'} integrar</b>` : '',
     !need && !open ? '<b class="s-ok">Tudo integrado</b>' : '',
     live ? `${plural(live, 'ativo', 'ativos')} agora` : '',
+    verifying ? `reverificando ${plural(verifying, 'pasta', 'pastas')}` : '',
     `atualizado ${ago(lastLoad)}`,
   ]
   summaryEl.innerHTML = parts.filter(Boolean).join(' · ')
@@ -608,6 +613,32 @@ async function loadPending(fresh = false) {
   } catch (e) {
     toast(`Não consegui verificar as pendências: ${e}`, true)
   }
+}
+
+// ---------- Reverificação em segundo plano ----------
+let patchTimer = 0
+function schedulePatch() {
+  clearTimeout(patchTimer)
+  patchTimer = window.setTimeout(() => { link(); renderProjects(); render() }, 150)
+}
+if (IN_TAURI) {
+  // O backend respondeu na hora com o último estado; aqui chegam os resultados frescos, em lotes.
+  void listen<{ id: string; git: GitInfo | null }[]>('run-git', (e) => {
+    const byRun = new Map(runs.map((r) => [r.id, r]))
+    let touched = false
+    for (const { id, git } of e.payload) {
+      const r = byRun.get(id)
+      if (!r) continue
+      r.git = git; r.stale = false; touched = true
+    }
+    if (touched) schedulePatch()
+  })
+  // O vigia de arquivos avisou que uma pasta mudou: recarrega (agrupando várias pastas numa só).
+  let fsTimer = 0
+  void listen<string[]>('fs-changed', () => {
+    clearTimeout(fsTimer)
+    fsTimer = window.setTimeout(async () => { if (await onScreen()) void load() }, 1000)
+  })
 }
 
 async function call(cmd: string, args: Record<string, string>) {

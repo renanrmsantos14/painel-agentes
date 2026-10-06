@@ -1,11 +1,12 @@
 //! Pendências: trabalho que ainda não está mesclado na branch principal E enviado ao GitHub.
 //! Olha os worktrees e branches de cada repositório, não só os chats, para nada ficar esquecido.
 
-use crate::{git, git_ok, same_path, Ctx};
-use serde::Serialize;
+use crate::cache::{self, Cache};
+use crate::{git, git_ok, same_path};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
 /// `unmerged` só depende das pontas da base e da branch: com o mesmo par de commits, a resposta é a mesma.
@@ -16,12 +17,12 @@ static REPO_OF: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default
 /// Branches sem worktree só contam se tiveram commit nos últimos dias (evita branches antigas abandonadas).
 const BRANCH_MAX_AGE_DAYS: i64 = 30;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Pending {
     pub key: String,
     /// dirty | unmerged | unpushed | cleanup
-    pub kind: &'static str,
+    pub kind: String,
     pub project: String,
     pub repo_root: String,
     pub path: String,
@@ -34,22 +35,34 @@ pub struct Pending {
     /// Chat mais recente ligado a esta pendência (pela pasta ou branch).
     pub chat_title: Option<String>,
     pub chat_url: Option<String>,
-    pub chat_agent: Option<&'static str>,
+    pub chat_agent: Option<String>,
 }
 
-struct Ref {
-    tip: String,
-    time: i64,
-    upstream: String,
-    track: String,
+pub(crate) struct Ref {
+    pub(crate) tip: String,
+    pub(crate) time: i64,
+    pub(crate) upstream: String,
+    pub(crate) track: String,
 }
 
-struct Refs {
-    heads: HashMap<String, Ref>,
+pub(crate) struct Refs {
+    pub(crate) heads: HashMap<String, Ref>,
     /// Pontas das branches remotas (ex.: `origin/main`).
-    remotes: HashMap<String, String>,
+    pub(crate) remotes: HashMap<String, String>,
     /// Branch padrão do GitHub (`origin/HEAD`), sem o prefixo `origin/`.
-    origin_head: Option<String>,
+    pub(crate) origin_head: Option<String>,
+}
+
+/// Refs por repositório, compartilhadas entre chats e pendências; o vigia invalida quando `.git` muda.
+pub(crate) static REFS: Cache<Arc<Refs>> = Cache::new();
+
+pub(crate) fn refs_cached(repo: &str) -> Arc<Refs> {
+    if let Some(r) = REFS.get(repo) {
+        return r;
+    }
+    let r = Arc::new(refs(repo));
+    REFS.put(repo, r.clone());
+    r
 }
 
 /// Branches locais e remotas num único `for-each-ref` (antes eram também `symbolic-ref` e `git remote`).
@@ -134,7 +147,7 @@ fn unmerged(dir: &str, base: &str, branch: &str) -> (u32, Vec<String>) {
 
 /// Arquivos alterados e a data da alteração mais recente entre eles.
 fn dirty(dir: &str) -> (u32, i64) {
-    let out = git(dir, &["status", "--porcelain"]).unwrap_or_default();
+    let out = cache::status(dir);
     let mut newest = 0i64;
     let mut n = 0;
     for line in out.lines() {
@@ -208,21 +221,24 @@ fn unpushed(repo: &str, base: &str, r: &Ref, remote_tip: Option<&String>) -> (u3
     (ahead, commits)
 }
 
-fn scan_repo(repo: &str, now: i64) -> Vec<Pending> {
-    let all = refs(repo);
-    let Some(base) = base_of(&all) else { return vec![] };
-    let refs = &all.heads;
-    let project = Path::new(repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let has_remote = !all.remotes.is_empty();
-    let mut out = vec![];
-    let item = |kind: &'static str, path: &str, branch: &str, count: u32, last: i64, commits: Vec<String>, worktree: bool| Pending {
+struct RepoHead {
+    repo: String,
+    project: String,
+    base: String,
+    refs: Arc<Refs>,
+    worktrees: Vec<Wt>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn item(kind: &str, project: &str, repo: &str, base: &str, path: &str, branch: &str, count: u32, last: i64, commits: Vec<String>, worktree: bool) -> Pending {
+    Pending {
         key: format!("{kind}|{}|{branch}", path.to_lowercase()),
-        kind,
-        project: project.clone(),
+        kind: kind.to_string(),
+        project: project.to_string(),
         repo_root: repo.to_string(),
         path: path.to_string(),
         branch: branch.to_string(),
-        base: base.clone(),
+        base: base.to_string(),
         count,
         last_activity: last,
         commits,
@@ -230,58 +246,66 @@ fn scan_repo(repo: &str, now: i64) -> Vec<Pending> {
         chat_title: None,
         chat_url: None,
         chat_agent: None,
-    };
+    }
+}
+
+/// Fase 1 (por repositório): refs, base, lista de worktrees, "sem push" e branches sem worktree.
+fn scan_repo_head(repo: &str, now: i64) -> Option<(RepoHead, Vec<Pending>)> {
+    let all = refs_cached(repo);
+    let base = base_of(&all)?;
+    let project = Path::new(repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let worktrees = worktrees(repo);
+    let with_worktree: HashSet<&str> = worktrees.iter().filter_map(|w| w.branch.as_deref()).collect();
+    let mut out = vec![];
 
     // Base mesclada mas não enviada ao GitHub.
-    if has_remote {
-        if let Some(r) = refs.get(&base) {
+    if !all.remotes.is_empty() {
+        if let Some(r) = all.heads.get(&base) {
             let (ahead, commits) = unpushed(repo, &base, r, all.remotes.get(&format!("origin/{base}")));
             if ahead > 0 {
-                out.push(item("unpushed", repo, &base, ahead, tip_time(refs, &base), commits, false));
+                out.push(item("unpushed", &project, repo, &base, repo, &base, ahead, tip_time(&all.heads, &base), commits, false));
             }
         }
     }
 
-    let mut with_worktree = HashSet::new();
-    for wt in worktrees(repo) {
-        let is_main = same_path(&wt.path, repo);
-        let (n, newest) = dirty(&wt.path);
-        let branch = wt.branch.clone().unwrap_or_else(|| "(detached)".into());
-        if n > 0 {
-            out.push(item("dirty", &wt.path, &branch, n, newest, vec![], !is_main));
-        }
-        let Some(b) = wt.branch else { continue };
-        with_worktree.insert(b.clone());
-        if b == base {
+    // Branches sem worktree com commits recentes que nunca chegaram à base.
+    for (b, r) in &all.heads {
+        if *b == base || with_worktree.contains(b.as_str()) || r.tip.is_empty() || now - r.time > BRANCH_MAX_AGE_DAYS * 86_400_000 {
             continue;
         }
-        let (ahead, commits) = unmerged_cached(&wt.path, refs, &base, &b);
+        let (ahead, commits) = unmerged_cached(repo, &all.heads, &base, b);
         if ahead > 0 {
-            out.push(item("unmerged", &wt.path, &b, ahead, tip_time(refs, &b), commits, !is_main));
-        } else if n == 0 && !is_main {
-            out.push(item("cleanup", &wt.path, &b, 0, tip_time(refs, &b), vec![], true));
+            out.push(item("unmerged", &project, repo, &base, repo, b, ahead, r.time, commits, false));
         }
     }
+    Some((RepoHead { repo: repo.to_string(), project, base, refs: all, worktrees }, out))
+}
 
-    // Branches sem worktree com commits recentes que nunca chegaram à base.
-    for (b, r) in refs {
-        if *b == base || with_worktree.contains(b) || r.tip.is_empty() {
-            continue;
-        }
-        let last = r.time;
-        if now - last > BRANCH_MAX_AGE_DAYS * 86_400_000 {
-            continue;
-        }
-        let (ahead, commits) = unmerged_cached(repo, refs, &base, b);
-        if ahead > 0 {
-            out.push(item("unmerged", repo, b, ahead, last, commits, false));
-        }
+/// Fase 2 (por worktree): arquivos sujos e commits fora da base.
+fn scan_worktree(h: &RepoHead, wt: &Wt) -> Vec<Pending> {
+    let is_main = same_path(&wt.path, &h.repo);
+    let (n, newest) = dirty(&wt.path);
+    let branch = wt.branch.clone().unwrap_or_else(|| "(detached)".into());
+    let mut out = vec![];
+    let item = |kind: &str, branch: &str, count, last, commits, worktree| item(kind, &h.project, &h.repo, &h.base, &wt.path, branch, count, last, commits, worktree);
+    if n > 0 {
+        out.push(item("dirty", &branch, n, newest, vec![], !is_main));
+    }
+    let Some(b) = &wt.branch else { return out };
+    if *b == h.base {
+        return out;
+    }
+    let (ahead, commits) = unmerged_cached(&wt.path, &h.refs.heads, &h.base, b);
+    if ahead > 0 {
+        out.push(item("unmerged", b, ahead, tip_time(&h.refs.heads, b), commits, !is_main));
+    } else if n == 0 && !is_main {
+        out.push(item("cleanup", b, 0, tip_time(&h.refs.heads, b), vec![], true));
     }
     out
 }
 
 /// Repositórios conhecidos: pastas dos chats + subpastas com Git em Desktop\vscode e Desktop\Projetos.
-pub fn repos(ctx: &Ctx, chat_dirs: &[String]) -> Vec<String> {
+pub fn repos(chat_dirs: &[String]) -> Vec<String> {
     let mut dirs: Vec<String> = chat_dirs.to_vec();
     if let Some(home) = std::env::var_os("USERPROFILE") {
         for sub in ["vscode", "Projetos"] {
@@ -296,7 +320,6 @@ pub fn repos(ctx: &Ctx, chat_dirs: &[String]) -> Vec<String> {
         }
     }
     // Só descobre o repositório de cada pasta (um rev-parse leve, sem status), sem repetir pastas.
-    let _ = ctx;
     let mut seen_dir = HashSet::new();
     let mut seen = HashSet::new();
     let mut out = vec![];
@@ -322,23 +345,41 @@ pub fn repos(ctx: &Ctx, chat_dirs: &[String]) -> Vec<String> {
     out
 }
 
-pub fn scan(ctx: &Ctx, chat_dirs: &[String], now: i64) -> Vec<Pending> {
-    let repos = repos(ctx, chat_dirs);
-    let results = std::sync::Mutex::new(vec![]);
+/// Roda `f` sobre `items` em até `workers` threads e junta os resultados.
+fn parallel<T: Sync, R: Send>(items: &[T], workers: usize, f: impl Fn(&T) -> Vec<R> + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let out = Mutex::new(vec![]);
     std::thread::scope(|s| {
-        for _ in 0..6 {
+        for _ in 0..workers.min(items.len().max(1)) {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(repo) = repos.get(i) else { break };
-                let items = scan_repo(repo, now);
-                results.lock().unwrap().extend(items);
+                let Some(it) = items.get(i) else { break };
+                let r = f(it);
+                out.lock().unwrap().extend(r);
             });
         }
     });
-    let mut list = results.into_inner().unwrap();
+    out.into_inner().unwrap()
+}
+
+/// Pendências de todos os repositórios conhecidos e as raízes `(worktree, repositório)` para o vigia.
+pub fn scan(chat_dirs: &[String], now: i64) -> (Vec<Pending>, Vec<(String, String)>) {
+    let repos = repos(chat_dirs);
+    let heads: Vec<(RepoHead, Vec<Pending>)> = parallel(&repos, 8, |r| scan_repo_head(r, now).into_iter().collect());
+    let mut list: Vec<Pending> = vec![];
+    let mut tasks: Vec<(&RepoHead, &Wt)> = vec![];
+    let mut roots = vec![];
+    for (h, items) in &heads {
+        list.extend(items.iter().cloned());
+        roots.push((h.repo.clone(), h.repo.clone()));
+        for wt in &h.worktrees {
+            tasks.push((h, wt));
+            roots.push((wt.path.clone(), h.repo.clone()));
+        }
+    }
+    list.extend(parallel(&tasks, 8, |(h, wt)| scan_worktree(h, wt)));
     list.sort_by(|a, b| a.last_activity.cmp(&b.last_activity));
-    list
+    (list, roots)
 }
 
 /// Remove um worktree só quando nada se perde: pasta limpa e branch já mesclada na base.
@@ -354,10 +395,14 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
     }
     let wt = worktrees(&repo).into_iter().find(|w| same_path(&w.path, path)).ok_or("A pasta não está na lista de worktrees do repositório")?;
     let branch = wt.branch.ok_or("Worktree sem branch (detached): remova manualmente")?;
+    // Decisão de apagar pasta: lê status e refs frescos, sem depender do cache.
+    cache::STATUS.invalidate(path);
     if dirty(path).0 > 0 {
         return Err("O worktree tem arquivos não commitados".into());
     }
-    let base = base_of(&refs(&repo)).ok_or("Branch base não encontrada")?;
+    let fresh = Arc::new(refs(&repo));
+    REFS.put(&repo, fresh.clone());
+    let base = base_of(&fresh).ok_or("Branch base não encontrada")?;
     if branch == base || unmerged(path, &base, &branch).0 > 0 {
         return Err(format!("A branch {branch} ainda tem commits fora da {base}"));
     }
@@ -365,6 +410,8 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
     if !out.status.success() {
         return Err(format!("O Git recusou remover: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
+    REFS.invalidate(&repo);
+    cache::STATUS.invalidate(path);
     Ok(())
 }
 

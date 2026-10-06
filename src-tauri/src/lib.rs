@@ -1,7 +1,9 @@
+mod cache;
 mod pending;
+mod watch;
 
 use rusqlite::{Connection, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,9 +26,9 @@ struct Pr {
     state: String,
 }
 
-#[derive(Serialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
-struct GitInfo {
+pub(crate) struct GitInfo {
     project: String,
     repo_root: String,
     branch: String,
@@ -46,7 +48,7 @@ struct GitInfo {
     dirty: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Run {
     id: String,
@@ -62,6 +64,8 @@ struct Run {
     prs: Vec<Pr>,
     git: Option<GitInfo>,
     open_url: String,
+    /// `git` veio do último estado conhecido; o job de verificação ainda não respondeu.
+    stale: bool,
 }
 
 struct Seed {
@@ -85,8 +89,7 @@ fn clean_path(p: &str) -> String {
 }
 
 fn same_path(a: &str, b: &str) -> bool {
-    let n = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
-    n(a) == n(b)
+    cache::norm(a) == cache::norm(b)
 }
 
 // ---------- Fontes de sessões ----------
@@ -166,6 +169,7 @@ fn claude_seeds(since: i64, archived: bool) -> Vec<Seed> {
                         needs_action: pick("needs_action"),
                         prs,
                         git: None,
+                        stale: false,
                     },
                     dirs,
                     branch: str_of(&v, "branch"),
@@ -219,6 +223,7 @@ fn codex_seeds(since: i64, archived: bool) -> Vec<Seed> {
                     needs_action: None,
                     prs: vec![],
                     git: None,
+                    stale: false,
                 },
                 dirs: vec![cwd],
                 branch: branch.filter(|b| !b.is_empty()),
@@ -267,7 +272,6 @@ fn numstat(out: &str) -> (Vec<String>, u32, u32) {
 #[derive(Default)]
 struct Ctx {
     dirs: Mutex<HashMap<String, Option<DirInfo>>>,
-    refs: Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
 #[derive(Clone)]
@@ -289,25 +293,11 @@ impl Ctx {
                 head: head_branch(&loc.git_dir),
                 top: loc.top,
                 main_repo: loc.main_repo,
-                dirty: git(dir, &["status", "--porcelain"]).map(|s| s.lines().count() as u32).unwrap_or(0),
+                dirty: cache::status(dir).lines().count() as u32,
             })
         })();
         self.dirs.lock().unwrap().insert(dir.to_string(), info.clone());
         info
-    }
-
-    /// Branches locais do repositório e o commit da ponta de cada uma.
-    fn refs(&self, repo: &str, dir: &str) -> HashMap<String, String> {
-        if let Some(hit) = self.refs.lock().unwrap().get(repo) {
-            return hit.clone();
-        }
-        let map: HashMap<String, String> = git(dir, &["for-each-ref", "--format=%(refname:short)%09%(objectname)", "refs/heads"])
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| l.split_once('\t').map(|(a, b)| (a.to_string(), b.to_string())))
-            .collect();
-        self.refs.lock().unwrap().insert(repo.to_string(), map.clone());
-        map
     }
 }
 
@@ -345,7 +335,8 @@ fn git_info(seed: &Seed, ctx: &Ctx) -> Option<GitInfo> {
     let first = seed.dirs.first()?;
     let dir = seed.dirs.iter().find(|d| !d.is_empty() && Path::new(d).is_dir())?;
     let d = ctx.dir(dir)?;
-    let refs = ctx.refs(&d.main_repo, dir);
+    let all = pending::refs_cached(&d.main_repo);
+    let refs = &all.heads;
 
     let mut g = GitInfo {
         project: Path::new(&d.main_repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
@@ -374,7 +365,7 @@ fn git_info(seed: &Seed, ctx: &Ctx) -> Option<GitInfo> {
     }
 
     // Cache: commits e estatísticas só mudam quando as pontas da branch/base ou a janela da sessão mudam.
-    let tip = |b: &str| refs.get(b).cloned().unwrap_or_default();
+    let tip = |b: &str| refs.get(b).map(|r| r.tip.clone()).unwrap_or_default();
     let key = format!(
         "{dir}|{}|{}|{}|{}|{}|{}|{}",
         g.branch, g.base, tip(&g.branch), tip(&g.base), seed.run.created_at, seed.run.updated_at,
@@ -471,26 +462,40 @@ fn expensive(dir: &str, seed: &Seed, mut g: GitInfo) -> GitInfo {
     g
 }
 
-fn scan(days: i64, archived: bool) -> Vec<Run> {
+/// Último GitInfo calculado por chat: devolvido na hora na abertura, enquanto o job reverifica.
+static LAST: std::sync::LazyLock<Mutex<HashMap<String, GitInfo>>> = std::sync::LazyLock::new(Default::default);
+
+fn seeds(days: i64, archived: bool) -> Vec<Seed> {
     let since = now_ms() - days.max(1) * 86_400_000;
     let mut seeds = claude_seeds(since, archived);
     seeds.extend(codex_seeds(since, archived));
+    seeds
+}
 
-    let ctx = Ctx::default();
+/// Calcula o Git de cada semente em paralelo; `on_done(i, git)` é chamado assim que cada uma termina.
+fn compute(seeds: &[Seed], ctx: &Ctx, on_done: impl Fn(usize, Option<GitInfo>) + Sync) {
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<GitInfo>>> = Mutex::new((0..seeds.len()).map(|_| None).collect());
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8);
+    let workers = std::thread::available_parallelism().map(|n| n.get() * 2).unwrap_or(8).clamp(4, 16);
     std::thread::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some(seed) = seeds.get(i) else { break };
-                let info = git_info(seed, &ctx);
-                results.lock().unwrap()[i] = info;
+                let g = git_info(seed, ctx);
+                if let Some(g) = &g {
+                    LAST.lock().unwrap().insert(seed.run.id.clone(), g.clone());
+                }
+                on_done(i, g);
             });
         }
     });
+}
 
+/// Varredura completa e síncrona (usada pelo `--dump`).
+fn scan(days: i64, archived: bool) -> Vec<Run> {
+    let seeds = seeds(days, archived);
+    let results: Mutex<Vec<Option<GitInfo>>> = Mutex::new((0..seeds.len()).map(|_| None).collect());
+    compute(&seeds, &Ctx::default(), |i, g| results.lock().unwrap()[i] = g);
     let infos = results.into_inner().unwrap();
     let mut runs: Vec<Run> = seeds
         .into_iter()
@@ -504,11 +509,89 @@ fn scan(days: i64, archived: bool) -> Vec<Run> {
     runs
 }
 
+// ---------- Verificação em segundo plano ----------
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RunGit {
+    id: String,
+    git: Option<GitInfo>,
+}
+
+/// Sementes esperando verificação; um `list_runs` novo substitui a fila (o filtro mudou).
+static QUEUE: Mutex<Vec<Seed>> = Mutex::new(Vec::new());
+static VERIFYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const EMIT_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Verifica o Git das sementes em segundo plano e avisa o frontend em lotes de `run-git`.
+fn verify_job(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        loop {
+            let batch: Vec<Seed> = std::mem::take(&mut *QUEUE.lock().unwrap());
+            if batch.is_empty() {
+                break;
+            }
+            let (tx, rx) = std::sync::mpsc::channel::<RunGit>();
+            let tx = Mutex::new(tx);
+            let ctx = Ctx::default();
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    compute(&batch, &ctx, |i, git| {
+                        let _ = tx.lock().unwrap().send(RunGit { id: batch[i].run.id.clone(), git });
+                    });
+                    drop(tx);
+                });
+                let mut ready: Vec<RunGit> = vec![];
+                let mut last = std::time::Instant::now();
+                loop {
+                    match rx.recv_timeout(EMIT_EVERY) {
+                        Ok(r) => ready.push(r),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    if !ready.is_empty() && last.elapsed() >= EMIT_EVERY {
+                        let _ = app.emit("run-git", std::mem::take(&mut ready));
+                        last = std::time::Instant::now();
+                    }
+                }
+                if !ready.is_empty() {
+                    let _ = app.emit("run-git", ready);
+                }
+            });
+        }
+        VERIFYING.store(false, Ordering::SeqCst);
+        save_state();
+    });
+}
+
+/// Grava o último Git por chat e as últimas pendências para a próxima abertura.
+fn save_state() {
+    let git = LAST.lock().unwrap().clone();
+    let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    cache::save_state(&cache::Saved { v: cache::STATE_VERSION, git, pending });
+}
+
 // ---------- Comandos ----------
 
+/// Responde na hora com os chats e o último Git conhecido (`stale`); o job reverifica e emite `run-git`.
 #[tauri::command]
-async fn list_runs(days: i64, archived: bool) -> Result<Vec<Run>, String> {
-    tauri::async_runtime::spawn_blocking(move || scan(days, archived)).await.map_err(|e| e.to_string())
+async fn list_runs(app: tauri::AppHandle, days: i64, archived: bool) -> Result<Vec<Run>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let seeds = seeds(days, archived);
+        let mut runs: Vec<Run> = {
+            let last = LAST.lock().unwrap();
+            seeds.iter().map(|s| Run { git: last.get(&s.run.id).cloned(), stale: true, ..s.run.clone() }).collect()
+        };
+        runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        *QUEUE.lock().unwrap() = seeds;
+        if !VERIFYING.swap(true, Ordering::SeqCst) {
+            verify_job(app);
+        }
+        runs
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -543,7 +626,8 @@ fn pending_now() -> Vec<pending::Pending> {
     let mut seeds = claude_seeds(since, true);
     seeds.extend(codex_seeds(since, true));
     let dirs: Vec<String> = seeds.iter().flat_map(|s| s.dirs.clone()).collect();
-    let mut items = pending::scan(&Ctx::default(), &dirs, now_ms());
+    let (mut items, roots) = pending::scan(&dirs, now_ms());
+    watch::add_roots(roots);
     seeds.sort_by(|a, b| b.run.updated_at.cmp(&a.run.updated_at));
     for p in &mut items {
         let at_repo = same_path(&p.path, &p.repo_root);
@@ -555,7 +639,7 @@ fn pending_now() -> Vec<pending::Pending> {
         if let Some(s) = hit {
             p.chat_title = Some(s.run.title.clone());
             p.chat_url = Some(s.run.open_url.clone());
-            p.chat_agent = Some(s.run.agent);
+            p.chat_agent = Some(s.run.agent.to_string());
         }
     }
     items
@@ -575,6 +659,8 @@ fn pending_cached(max_age_ms: i64) -> Vec<pending::Pending> {
     }
     let items = pending_now();
     *slot = Some((now_ms(), items.clone()));
+    drop(slot);
+    save_state();
     items
 }
 
@@ -665,7 +751,7 @@ const DAY_MS: i64 = 86_400_000;
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn kind_text(p: &pending::Pending) -> String {
-    match p.kind {
+    match p.kind.as_str() {
         "dirty" => format!("{} arquivo(s) não commitado(s)", p.count),
         "unmerged" => format!("{} commit(s) fora da {}", p.count, p.base),
         "unpushed" => format!("{} commit(s) sem push", p.count),
@@ -773,6 +859,15 @@ pub fn run() {
                     let _ = w.hide();
                 }
             }
+            // Estado da abertura anterior: o painel aparece completo antes do git responder.
+            if let Ok(dir) = app.path().app_data_dir() {
+                cache::set_state_file(dir.join("estado.json"));
+                if let Some(s) = cache::load_state() {
+                    *LAST.lock().unwrap() = s.git;
+                    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = s.pending;
+                }
+            }
+            watch::start(app.handle().clone());
             watcher(app.handle().clone());
             Ok(())
         })

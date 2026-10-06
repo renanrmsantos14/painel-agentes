@@ -216,6 +216,9 @@ select {
 .stats .add { color: var(--merged); font-weight: 700; }
 .stats .del { color: var(--danger); font-weight: 700; }
 /* Pulso com transform/opacity num pseudo-elemento: roda no compositor, sem repintar a linha a cada quadro. */
+/* Linha com o último estado conhecido, ainda sem resposta do git nesta abertura. */
+.trow.stale .badge { opacity: .6; }
+.verifying { width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--bt-color-text-secondary); flex: none; animation: blink 1.2s ease-in-out infinite; }
 .live { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--merged); flex: none; }
 .live::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--merged); animation: pulse 1.8s infinite; will-change: transform, opacity; }
 @keyframes pulse { from { transform: scale(1); opacity: .6; } 70%, to { transform: scale(2.5); opacity: 0; } }
