@@ -542,6 +542,45 @@ fn set_autostart(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     if on { a.enable() } else { a.disable() }.map_err(|e| e.to_string())
 }
 
+// ---------- Atualização pelo GitHub Releases (renanrmsantos14/painel-agentes) ----------
+// Só baixa quando a pessoa clica em "Atualizar agora"; o instalador roda em silêncio e reabre o app.
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
+    Ok(update.map(|u| UpdateInfo { version: u.version.clone(), notes: u.body.clone() }))
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    use tauri_plugin_updater::UpdaterExt;
+    let Some(update) = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())? else {
+        return Err("Já está na versão mais recente".into());
+    };
+    let progress = app.clone();
+    let mut received: u64 = 0;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                received += chunk as u64;
+                let pct = total.filter(|t| *t > 0).map(|t| received * 100 / t).unwrap_or(0);
+                let _ = progress.emit("update-progress", pct);
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("Falha ao baixar ou instalar a atualização: {e}"))?;
+    app.restart();
+}
+
 const DAY_MS: i64 = 86_400_000;
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
@@ -623,8 +662,9 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
-        .invoke_handler(tauri::generate_handler![list_runs, list_pending, open_run, open_folder, open_link, get_autostart, set_autostart])
+        .invoke_handler(tauri::generate_handler![list_runs, list_pending, open_run, open_folder, open_link, get_autostart, set_autostart, check_update, install_update])
         .setup(move |app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};

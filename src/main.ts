@@ -561,6 +561,37 @@ daysSel.addEventListener('change', () => { ui.days = Number(daysSel.value); pers
 archivedChk.checked = ui.archived
 archivedChk.addEventListener('change', () => { ui.archived = archivedChk.checked; persist(); void load() })
 refreshBtn.addEventListener('click', () => void load(true))
+// ---------- Atualização do app (GitHub Releases) ----------
+const updBtn = $<HTMLButtonElement>('update')
+let updating = false
+async function checkUpdate() {
+  if (!('__TAURI_INTERNALS__' in window) || updating) return
+  try {
+    const u = await invoke<{ version: string } | null>('check_update')
+    updBtn.hidden = !u
+    if (u) updBtn.textContent = `Atualizar para v${u.version}`
+  } catch { /* sem internet: tenta de novo mais tarde */ }
+}
+updBtn.addEventListener('click', async () => {
+  if (updating) return
+  updating = true
+  updBtn.disabled = true
+  updBtn.textContent = 'Baixando…'
+  try {
+    await invoke('install_update')
+  } catch (e) {
+    toast(String(e), true)
+    updating = false
+    updBtn.disabled = false
+    void checkUpdate()
+  }
+})
+if ('__TAURI_INTERNALS__' in window) {
+  void listen<number>('update-progress', (e) => { updBtn.textContent = e.payload >= 100 ? 'Instalando…' : `Baixando ${e.payload}%` })
+  setTimeout(() => void checkUpdate(), 5_000)
+  setInterval(() => void checkUpdate(), 4 * 3_600_000)
+}
+
 const autoChk = $<HTMLInputElement>('autostart')
 if ('__TAURI_INTERNALS__' in window) {
   void invoke<boolean>('get_autostart').then((on) => (autoChk.checked = on))

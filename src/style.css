@@ -323,3 +323,10 @@ select {
 @media (hover: hover) and (pointer: fine) { .pd-clean:hover { color: var(--bt-color-text-primary); background: var(--bt-color-surface-soft); } }
 .pd-clean svg { width: 14px; height: 14px; }
 @media (max-width: 1000px) { .pd { grid-template-columns: auto minmax(0, 1fr) 100px; } .pd-chat { display: none; } }
+
+.update-btn {
+  height: 34px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer; font-weight: 600; color: #fff;
+  background: linear-gradient(135deg, var(--claude), var(--codex)); box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--codex) 70%, transparent);
+}
+.update-btn:disabled { opacity: .75; cursor: progress; }
+.update-btn[hidden] { display: none; }
