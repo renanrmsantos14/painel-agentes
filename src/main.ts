@@ -743,18 +743,26 @@ async function removeAll(list: Pending[]) {
   const cancel = modal.querySelector<HTMLButtonElement>('[data-m-cancel]')!
   go.disabled = cancel.disabled = true
   const fails: { p: Pending; err: string }[] = []
-  for (const [i, p] of list.entries()) {
-    go.textContent = `Removendo ${i + 1} de ${list.length}…`
-    const li = modal.querySelector<HTMLElement>(`li[data-path="${CSS.escape(p.path)}"]`)
-    try {
-      await invoke('remove_worktree', { path: p.path })
-      li?.classList.add('done')
-    } catch (e) {
-      fails.push({ p, err: String(e) })
-      li?.classList.add('fail')
-      li?.insertAdjacentHTML('beforeend', `<em>${esc(String(e))}</em>`)
+  // Algumas em paralelo: cada remoção é quase toda espera por processos do Git.
+  let next = 0
+  let finished = 0
+  go.textContent = `Removendo 0 de ${list.length}…`
+  const worker = async () => {
+    while (next < list.length) {
+      const p = list[next++]
+      const li = modal.querySelector<HTMLElement>(`li[data-path="${CSS.escape(p.path)}"]`)
+      try {
+        await invoke('remove_worktree', { path: p.path })
+        li?.classList.add('done')
+      } catch (e) {
+        fails.push({ p, err: String(e) })
+        li?.classList.add('fail')
+        li?.insertAdjacentHTML('beforeend', `<em>${esc(String(e))}</em>`)
+      }
+      go.textContent = `Removendo ${++finished} de ${list.length}…`
     }
   }
+  await Promise.all(Array.from({ length: Math.min(4, list.length) }, worker))
   removing = false
   const done = list.length - fails.length
   void loadPending()

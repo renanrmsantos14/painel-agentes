@@ -225,8 +225,25 @@ fn codex_seeds(since: i64, archived: bool) -> Vec<Seed> {
 
 // ---------- Git ----------
 
+/// No Git for Windows, `cmd\git.exe` é só um lançador que abre o `mingw64\bin\git.exe` (dois processos por
+/// chamada; aqui ~1,5 s contra ~0,25 s). Usa o binário real quando existe; os comandos usados são todos internos.
+fn git_exe() -> &'static PathBuf {
+    static EXE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|d| d.join("git.exe"))
+            .find(|p| p.is_file())
+            .and_then(|p| {
+                let root = p.parent()?.parent()?;
+                ["mingw64", "clangarm64", "mingw32"].iter().map(|m| root.join(m).join("bin").join("git.exe")).find(|r| r.is_file())
+            })
+            .unwrap_or_else(|| PathBuf::from("git"))
+    })
+}
+
 fn git_cmd(dir: &str, args: &[&str]) -> Command {
-    let mut c = Command::new("git");
+    let mut c = Command::new(git_exe());
     c.arg("-C").arg(dir).args(["-c", "core.quotepath=false"]).args(args).env("GIT_OPTIONAL_LOCKS", "0");
     #[cfg(windows)]
     c.creation_flags(CREATE_NO_WINDOW);
