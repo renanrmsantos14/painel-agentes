@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "painel-web", "runtimeExecutable": "pnpm", "runtimeArgs": ["vite"], "port": 45213 }
+  ]
+}

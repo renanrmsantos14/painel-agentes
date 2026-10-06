@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.worktrees/
+public/mock-runs.json
+public/mock-pending.json
