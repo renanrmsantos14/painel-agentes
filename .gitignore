@@ -5,3 +5,4 @@ src-tauri/gen/
 .worktrees/
 public/mock-runs.json
 public/mock-pending.json
+.memsearch/
