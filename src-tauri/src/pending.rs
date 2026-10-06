@@ -276,3 +276,70 @@ pub fn scan(ctx: &Ctx, chat_dirs: &[String], now: i64) -> Vec<Pending> {
     list.sort_by(|a, b| a.last_activity.cmp(&b.last_activity));
     list
 }
+
+/// Remove um worktree só quando nada se perde: pasta limpa e branch já mesclada na base.
+/// Usa `git worktree remove` sem `--force` (o Git ainda recusa se achar algo não salvo) e mantém a branch.
+pub fn remove_worktree(path: &str) -> Result<(), String> {
+    if !Path::new(path).is_dir() {
+        return Err("A pasta do worktree não existe mais".into());
+    }
+    let common = git(path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok_or("A pasta não é um repositório Git")?;
+    let repo = Path::new(&common).parent().map(|p| p.to_string_lossy().replace('/', "\\")).ok_or("Repositório não encontrado")?;
+    if same_path(path, &repo) {
+        return Err("Esta é a pasta principal do repositório, não um worktree".into());
+    }
+    let wt = worktrees(&repo).into_iter().find(|w| same_path(&w.path, path)).ok_or("A pasta não está na lista de worktrees do repositório")?;
+    let branch = wt.branch.ok_or("Worktree sem branch (detached): remova manualmente")?;
+    if dirty(path).0 > 0 {
+        return Err("O worktree tem arquivos não commitados".into());
+    }
+    let base = base_of(&repo, &refs(&repo)).ok_or("Branch base não encontrada")?;
+    if branch == base || unmerged(path, &base, &branch).0 > 0 {
+        return Err(format!("A branch {branch} ainda tem commits fora da {base}"));
+    }
+    let out = crate::git_cmd(&repo, &["worktree", "remove", path]).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("O Git recusou remover: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_worktree;
+    use std::process::Command;
+
+    fn sh(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success();
+        assert!(ok, "git {args:?} falhou");
+    }
+
+    #[test]
+    fn remove_so_worktree_limpa_e_mesclada() {
+        let root = std::env::temp_dir().join(format!("painel-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        let wt = root.join("wt");
+        let wt_s = wt.to_string_lossy().to_string();
+        sh(&repo, &["worktree", "add", "-q", "-b", "feat", &wt_s]);
+
+        // Com arquivo não commitado: recusa.
+        std::fs::write(wt.join("a.txt"), "x").unwrap();
+        assert!(remove_worktree(&wt_s).is_err());
+        // Com commit fora da main: recusa.
+        sh(&wt, &["add", "a.txt"]);
+        sh(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        assert!(remove_worktree(&wt_s).unwrap_err().contains("fora da main"));
+        // Pasta principal: recusa.
+        assert!(remove_worktree(&repo.to_string_lossy()).is_err());
+        // Mesclada e limpa: remove a pasta e mantém a branch.
+        sh(&repo, &["merge", "-q", "--ff-only", "feat"]);
+        remove_worktree(&wt_s).unwrap();
+        assert!(!wt.exists());
+        sh(&repo, &["rev-parse", "--verify", "-q", "feat"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

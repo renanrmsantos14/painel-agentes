@@ -525,6 +525,29 @@ fn pending_now() -> Vec<pending::Pending> {
 }
 
 #[tauri::command]
+async fn remove_worktree(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || pending::remove_worktree(&path)).await.map_err(|e| e.to_string())?
+}
+
+/// Abre a pasta no VS Code (instalação do usuário ou do sistema).
+#[tauri::command]
+fn open_editor(path: String) -> Result<(), String> {
+    if !Path::new(&path).is_dir() {
+        return Err("A pasta não existe mais".into());
+    }
+    let exe = [("LOCALAPPDATA", r"Programs\Microsoft VS Code\Code.exe"), ("ProgramFiles", r"Microsoft VS Code\Code.exe")]
+        .iter()
+        .filter_map(|(var, rel)| std::env::var_os(var).map(|d| PathBuf::from(d).join(rel)))
+        .find(|p| p.is_file())
+        .ok_or("VS Code não encontrado")?;
+    let mut c = Command::new(exe);
+    c.arg(&path);
+    #[cfg(windows)]
+    c.creation_flags(CREATE_NO_WINDOW);
+    c.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn list_pending() -> Result<Vec<pending::Pending>, String> {
     tauri::async_runtime::spawn_blocking(pending_now).await.map_err(|e| e.to_string())
 }
@@ -664,7 +687,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
-        .invoke_handler(tauri::generate_handler![list_runs, list_pending, open_run, open_folder, open_link, get_autostart, set_autostart, check_update, install_update])
+        .invoke_handler(tauri::generate_handler![list_runs, list_pending, open_run, open_folder, open_link, open_editor, remove_worktree, get_autostart, set_autostart, check_update, install_update])
         .setup(move |app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
