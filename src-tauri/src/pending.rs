@@ -11,8 +11,10 @@ use std::time::UNIX_EPOCH;
 
 /// `unmerged` só depende das pontas da base e da branch: com o mesmo par de commits, a resposta é a mesma.
 static UNMERGED: LazyLock<Mutex<HashMap<String, (u32, Vec<String>)>>> = LazyLock::new(Default::default);
-/// Pasta -> repositório principal (não muda enquanto a pasta existir).
-static REPO_OF: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
+/// Pasta -> repositório principal (`None` se a pasta não é Git). Quase não muda.
+static REPO_OF: Cache<Option<String>> = Cache::new();
+/// Worktrees por repositório; o vigia invalida quando `.git` muda (add/remove de worktree).
+pub(crate) static WORKTREES: Cache<Arc<Vec<Wt>>> = Cache::new();
 
 /// Branches sem worktree só contam se tiveram commit nos últimos dias (evita branches antigas abandonadas).
 const BRANCH_MAX_AGE_DAYS: i64 = 30;
@@ -168,12 +170,21 @@ fn dirty(dir: &str) -> (u32, i64) {
     (n, newest)
 }
 
-struct Wt {
+pub(crate) struct Wt {
     path: String,
     branch: Option<String>,
 }
 
-fn worktrees(dir: &str) -> Vec<Wt> {
+fn worktrees(repo: &str) -> Arc<Vec<Wt>> {
+    if let Some(w) = WORKTREES.get(repo) {
+        return w;
+    }
+    let w = Arc::new(worktrees_fresh(repo));
+    WORKTREES.put(repo, w.clone());
+    w
+}
+
+fn worktrees_fresh(dir: &str) -> Vec<Wt> {
     let out = git(dir, &["worktree", "list", "--porcelain"]).unwrap_or_default();
     let mut list = vec![];
     for block in out.split("\n\n") {
@@ -226,7 +237,7 @@ struct RepoHead {
     project: String,
     base: String,
     refs: Arc<Refs>,
-    worktrees: Vec<Wt>,
+    worktrees: Arc<Vec<Wt>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -327,17 +338,16 @@ pub fn repos(chat_dirs: &[String]) -> Vec<String> {
         if d.is_empty() || !seen_dir.insert(d.to_lowercase()) || !Path::new(&d).is_dir() {
             continue;
         }
-        let key = d.to_lowercase();
-        let known = REPO_OF.lock().unwrap().get(&key).cloned();
-        let repo = match known {
-            Some(r) => r,
+        let repo = match REPO_OF.get(&d) {
+            Some(known) => known,
             None => {
-                let Some(common) = git(&d, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) else { continue };
-                let Some(r) = Path::new(&common).parent().map(|p| p.to_string_lossy().replace('/', "\\")) else { continue };
-                REPO_OF.lock().unwrap().insert(key, r.clone());
-                r
+                let found = git(&d, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                    .and_then(|common| Path::new(&common).parent().map(|p| p.to_string_lossy().replace('/', "\\")));
+                REPO_OF.put(&d, found.clone());
+                found
             }
         };
+        let Some(repo) = repo else { continue };
         if seen.insert(repo.to_lowercase()) && Path::new(&repo).is_dir() {
             out.push(repo);
         }
@@ -372,7 +382,7 @@ pub fn scan(chat_dirs: &[String], now: i64) -> (Vec<Pending>, Vec<(String, Strin
     for (h, items) in &heads {
         list.extend(items.iter().cloned());
         roots.push((h.repo.clone(), h.repo.clone()));
-        for wt in &h.worktrees {
+        for wt in h.worktrees.iter() {
             tasks.push((h, wt));
             roots.push((wt.path.clone(), h.repo.clone()));
         }
@@ -393,7 +403,7 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
     if same_path(path, &repo) {
         return Err("Esta é a pasta principal do repositório, não um worktree".into());
     }
-    let wt = worktrees(&repo).into_iter().find(|w| same_path(&w.path, path)).ok_or("A pasta não está na lista de worktrees do repositório")?;
+    let wt = worktrees_fresh(&repo).into_iter().find(|w| same_path(&w.path, path)).ok_or("A pasta não está na lista de worktrees do repositório")?;
     let branch = wt.branch.ok_or("Worktree sem branch (detached): remova manualmente")?;
     // Decisão de apagar pasta: lê status e refs frescos, sem depender do cache.
     cache::STATUS.invalidate(path);
@@ -411,6 +421,7 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
         return Err(format!("O Git recusou remover: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     REFS.invalidate(&repo);
+    WORKTREES.invalidate(&repo);
     cache::STATUS.invalidate(path);
     Ok(())
 }

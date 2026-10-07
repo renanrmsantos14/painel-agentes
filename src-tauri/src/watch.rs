@@ -92,6 +92,7 @@ pub fn start(app: tauri::AppHandle) {
                 }
                 Some(Change::Git(r)) => {
                     crate::pending::REFS.invalidate(&r);
+                    crate::pending::WORKTREES.invalidate(&r);
                     for (w, repo) in &roots {
                         if repo == &r {
                             cache::STATUS.invalidate(w);

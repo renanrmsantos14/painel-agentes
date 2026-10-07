@@ -308,21 +308,25 @@ struct Loc {
     git_dir: String,
 }
 
-/// Onde fica o repositório de cada pasta. Não muda enquanto a pasta existir, então o `rev-parse`
-/// (um processo git, caro no Windows) roda uma vez por pasta, não a cada atualização.
-static LOCS: std::sync::LazyLock<Mutex<HashMap<String, Loc>>> = std::sync::LazyLock::new(Default::default);
+/// Onde fica o repositório de cada pasta (ou `None` se não é Git). Quase não muda, então o `rev-parse`
+/// (um processo git, caro no Windows) roda uma vez por pasta a cada 10 min, não a cada atualização.
+static LOCS: cache::Cache<Option<Loc>> = cache::Cache::new();
 
 fn locate(dir: &str) -> Option<Loc> {
-    if let Some(hit) = LOCS.lock().unwrap().get(dir).filter(|l| Path::new(&l.git_dir).is_dir()) {
-        return Some(hit.clone());
+    if let Some(hit) = LOCS.get(dir) {
+        if hit.as_ref().is_none_or(|l| Path::new(&l.git_dir).is_dir()) {
+            return hit;
+        }
     }
-    let out = git(dir, &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "--git-dir"])?;
-    let mut l = out.lines();
-    let (top, common, git_dir) = (l.next()?.to_string(), l.next()?, l.next()?.to_string());
-    let main_repo = Path::new(common).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or(top.clone());
-    let loc = Loc { top, main_repo, git_dir };
-    LOCS.lock().unwrap().insert(dir.to_string(), loc.clone());
-    Some(loc)
+    let loc = (|| {
+        let out = git(dir, &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "--git-dir"])?;
+        let mut l = out.lines();
+        let (top, common, git_dir) = (l.next()?.to_string(), l.next()?, l.next()?.to_string());
+        let main_repo = Path::new(common).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or(top.clone());
+        Some(Loc { top, main_repo, git_dir })
+    })();
+    LOCS.put(dir, loc.clone());
+    loc
 }
 
 /// Branch atual lida direto do arquivo HEAD (sem processo git). `None` quando está em detached HEAD.
