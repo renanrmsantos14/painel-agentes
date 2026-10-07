@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { createSelect } from './select'
 
 declare const __APP_VERSION__: string
 declare const __BUILD_DATE__: string
@@ -58,8 +59,10 @@ const ICON = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const board = $<HTMLElement>('board')
 const qInput = $<HTMLInputElement>('q')
-const projectSel = $<HTMLSelectElement>('project')
-const daysSel = $<HTMLSelectElement>('days')
+const projectSel = createSelect($('project'), { label: 'Projeto', onChange: (v) => { ui.project = v; persist(); render() } })
+const daysSel = createSelect($('days'), { label: 'Período', searchable: false, onChange: (v) => { ui.days = Number(v); persist(); void load() } })
+projectSel.setOptions([{ value: '', label: 'Todos os projetos' }])
+daysSel.setOptions([3, 7, 30, 90].map((d) => ({ value: String(d), label: `${d} dias` })))
 const archivedChk = $<HTMLInputElement>('archived')
 const refreshBtn = $<HTMLButtonElement>('refresh')
 const summaryEl = $<HTMLElement>('summary')
@@ -216,7 +219,8 @@ function renderChips(list: Run[]) {
 function renderProjects() {
   const names = [...new Set([...runs, ...orphans].map(projectOf))].sort((a, b) => a.localeCompare(b, 'pt-BR'))
   if (ui.project && !names.includes(ui.project)) names.unshift(ui.project)
-  projectSel.innerHTML = `<option value="">Todos os projetos</option>${names.map((n) => `<option ${n === ui.project ? 'selected' : ''}>${esc(n)}</option>`).join('')}`
+  projectSel.setOptions([{ value: '', label: 'Todos os projetos' }, ...names.map((n) => ({ value: n, label: n }))])
+  projectSel.setValue(ui.project)
 }
 
 const ROW = 44
@@ -377,7 +381,7 @@ function project(name: string, list: Run[], from: number, to: number, width: num
     let tip = ''
     if (merged) tip = `<circle class="on-main" cx="${x1}" cy="${MAIN_Y}" r="7"/>`
     else if (s === 'need') tip = `<rect class="flag" x="${x1 - 7}" y="${y - 7}" width="14" height="14" rx="3"/>`
-    else if (s === 'open') tip = `<circle class="ring" cx="${x1}" cy="${y}" r="7"/><path class="hint" d="M${x1} ${y - 9}V${y - 22}M${x1 - 4} ${y - 18}L${x1} ${y - 22}L${x1 + 4} ${y - 18}"/>${pr ? `<text ${x1 > width - 150 ? `x="${x1 - 14}" text-anchor="end"` : `x="${x1 + 12}"`} y="${y + 4}">PR #${pr.number} → ${esc(g.base)}</text>` : ''}`
+    else if (s === 'open') tip = `<circle class="ring" cx="${x1}" cy="${y}" r="7"/><path class="up" d="M${x1} ${y - 11}V${y - 20}M${x1 - 3.5} ${y - 16.5}L${x1} ${y - 20}L${x1 + 3.5} ${y - 16.5}"/>${pr ? `<text class="pr-label" ${x1 > width - 150 ? `x="${x1 - 10}" y="${y + 19}" text-anchor="end"` : `x="${x1 + 12}" y="${y + 4}"`}>PR #${pr.number} → ${esc(g.base)}</text>` : ''}`
     else tip = `<circle class="ring" cx="${x1}" cy="${y}" r="6"/>`
     svg.push(`<g class="${cls}" data-id="${esc(r.id)}" style="${style}">
       <path class="lane-line" d="${fork}H${laneEnd}${back}"/>
@@ -492,7 +496,7 @@ function render() {
   const x = (t: number) => Math.round(((t - from) / (to - from)) * (width - 24)) + 12
   const tk = ticks(from, to)
   // "hoje" ocupa o último rótulo; os outros ficam só se não encostarem nele.
-  const axis = tk.filter((t) => x(to) - x(t.t) > 110).map((t) => `<span class="tick" style="left:${x(t.t)}px">${t.label}</span>`).join('')
+  const axis = tk.filter((t) => x(to) - x(t.t) > 190).map((t) => `<span class="tick" style="left:${x(t.t)}px">${t.label}</span>`).join('')
   const visibleClean = cleanups.filter((p) => !ui.project || p.project === ui.project)
   const title = { pending: 'O que está pendente', need: 'Esperando sua resposta', open: 'Falta integrar na base', all: 'Todas as branches' }[ui.focus]
 
@@ -502,7 +506,7 @@ function render() {
           <div><h2>${title}</h2><p>Cada linha sai da branch base, recebe commits e volta quando é mesclada</p></div>
           <div class="tl-tools">${legend()}${visibleClean.length ? `<button class="pill clean" data-clean-all>${ICON.tree}Limpar ${plural(visibleClean.length, 'worktree mesclada', 'worktrees mescladas')}</button>` : ''}</div>
         </div>
-        <div class="axis"><div class="axis-lbl">Branch · o que falta</div><div class="axis-track">${axis}<span class="now" style="left:${x(to) - 1}px">hoje · agora</span></div></div>
+        <div class="axis"><div class="axis-lbl">Branch · o que falta</div><div class="axis-track">${axis}<span class="now" style="left:${x(to) + 1}px">hoje · agora</span></div></div>
         ${ordered.map(([name, rs]) => project(name, rs, from, to, width, tk.map((t) => t.t))).join('')}
       </section>`
     : ui.focus === 'pending' && !ui.q && !ui.project && ui.agent === 'all'
@@ -529,7 +533,7 @@ function clearFilters() {
   ui.q = ''; qInput.value = ''
   ui.focus = 'pending'; ui.agent = 'all'; ui.project = ''
   syncAgent()
-  projectSel.value = ''
+  projectSel.setValue('')
   persist(); render()
 }
 
@@ -909,9 +913,7 @@ document.querySelectorAll<HTMLButtonElement>('#agent button').forEach((b) => {
   b.addEventListener('click', () => { ui.agent = b.dataset.v!; syncAgent(); persist(); render() })
 })
 syncAgent()
-projectSel.addEventListener('change', () => { ui.project = projectSel.value; persist(); render() })
-daysSel.value = String(ui.days)
-daysSel.addEventListener('change', () => { ui.days = Number(daysSel.value); persist(); void load() })
+daysSel.setValue(String(ui.days))
 archivedChk.checked = ui.archived
 archivedChk.addEventListener('change', () => { ui.archived = archivedChk.checked; persist(); void load() })
 refreshBtn.addEventListener('click', () => void load(true))

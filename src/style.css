@@ -69,7 +69,7 @@ body {
   overflow: hidden;
 }
 svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
-button, input, select { font: inherit; color: inherit; }
+button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :is(button, summary, input, select, [tabindex]):focus-visible { outline: none; border-color: var(--bt-focus-border) !important; box-shadow: var(--bt-focus-ring); }
 /* Todo controle pressionável responde ao toque */
@@ -120,12 +120,51 @@ h1 { margin: 0; font: 400 26px/1.08 var(--font-centabel-book); letter-spacing: -
 .dot.git { border: 2px solid var(--bt-color-text-tertiary); border-radius: 50%; }
 .seg button.on .dot { background: #fff; }
 
-select {
-  height: 40px; padding: 0 30px 0 12px; border-radius: 10px; border: 1px solid var(--bt-color-border); background: var(--bt-color-surface-neutral);
-  appearance: none; cursor: pointer; font-weight: 500; color: var(--bt-color-text-control);
-  background-image: linear-gradient(45deg, transparent 50%, var(--bt-color-text-secondary) 50%), linear-gradient(135deg, var(--bt-color-text-secondary) 50%, transparent 50%);
-  background-position: calc(100% - 16px) 17px, calc(100% - 12px) 17px; background-size: 4px 4px; background-repeat: no-repeat;
+/* Select do Design System Betinhos (bt-select): gatilho + painel próprio com busca. */
+.bt-control {
+  position: relative; display: flex; align-items: center; min-width: 0; height: 40px;
+  border: 1px solid var(--bt-color-border); border-radius: 10px; background: var(--bt-color-surface-neutral);
+  color: var(--bt-color-text-control); font-size: 13px; font-weight: 500;
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
+.bt-control:focus-within, .bt-control--combobox.is-open { border-color: var(--bt-focus-border); box-shadow: var(--bt-focus-ring); }
+.bt-select__trigger {
+  flex: 1 1 auto; align-self: stretch; display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0;
+  padding: 0 4px 0 12px; border: 0; border-radius: inherit; background: transparent; text-align: left; cursor: pointer;
+}
+.bt-select__trigger:focus, .bt-select__trigger:focus-visible { outline: 0; box-shadow: none; border-color: transparent !important; }
+.bt-select__value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bt-select__caret { flex: none; display: grid; place-items: center; padding: 0 10px 0 4px; color: var(--bt-color-text-secondary); pointer-events: none; }
+.bt-select__caret svg { transition: transform var(--dur-fast) var(--ease-out); }
+.bt-control--combobox.is-open .bt-select__caret svg { transform: rotate(180deg); }
+.bt-select-panel {
+  position: fixed; z-index: 2147483647; display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--bt-color-border); border-radius: 10px; background: var(--bt-color-surface);
+  color: var(--bt-color-text-primary); box-shadow: var(--bt-shadow-popover); font-size: 13px;
+  animation: bt-select-in 100ms var(--ease-out);
+}
+.bt-select-panel[hidden] { display: none; }
+@keyframes bt-select-in { from { opacity: 0; transform: translateY(-2px); } }
+.bt-select-panel__search {
+  flex: none; min-height: 32px; margin: 8px 8px 6px; padding: 0 10px; border: 1px solid var(--bt-color-border); border-radius: 8px;
+  outline: 0; background: var(--bt-color-surface-neutral);
+}
+.bt-select-panel__search:focus-visible { border-color: var(--bt-focus-border); box-shadow: var(--bt-focus-ring); }
+.bt-select-panel__search::placeholder { color: var(--bt-color-text-secondary); opacity: 1; }
+.bt-select-panel__list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.bt-select-panel__status { margin: 0; padding: 10px 12px; color: var(--bt-color-text-secondary); font-size: 12px; }
+.bt-select-option {
+  display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 12px; line-height: 1.25;
+  border-top: 1px solid var(--bt-color-border); cursor: pointer;
+}
+.bt-select-option:first-child { border-top: 0; }
+.bt-select-option.is-active { background: var(--bt-color-surface-soft); }
+.bt-select-option[aria-selected='true'] .bt-select-option__label { color: var(--bt-color-action); font-weight: 800; }
+.bt-select-option__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-project { width: 200px; }
+.sel-days { width: 110px; }
+@media (pointer: coarse) { .bt-control { height: 44px; } .bt-select-option { min-height: 40px; } }
+@media (prefers-reduced-motion: reduce) { .bt-select-panel { animation: none; } .bt-select__caret svg { transition: none; } }
 
 /* Menu de preferências: ações raras saem da barra principal */
 .menu { position: relative; }
@@ -196,7 +235,8 @@ select {
 .axis-lbl { padding: 11px 16px; }
 .axis-track { position: relative; border-left: 1px solid var(--bt-color-border); }
 .tick, .now { position: absolute; top: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; padding-left: 8px; border-left: 1px solid var(--bt-color-border); line-height: 14px; }
-.now { color: var(--bt-color-action); border-left-color: var(--bt-color-action); }
+/* "Hoje" fica colado à direita da área: o rótulo cresce para a esquerda da marca, sem sair da borda. */
+.now { color: var(--bt-color-action); transform: translateX(-100%); padding: 0 8px 0 0; border-left: 0; border-right: 1px solid var(--bt-color-action); }
 
 .proj { position: relative; border-bottom: 1px solid var(--bt-color-border); }
 .proj:last-child { border-bottom: 0; }
@@ -239,11 +279,14 @@ select {
 .graph .main-line.muted { stroke: var(--bt-color-border); stroke-width: 2; }
 .graph .fork { fill: var(--bt-color-brand); stroke: none; }
 .graph text { stroke: none; font: 800 11px var(--font-sans); fill: var(--s-text, var(--bt-color-text-secondary)); }
+.graph text.pr-label { stroke: var(--bt-color-surface); stroke-width: 4px; stroke-linejoin: round; paint-order: stroke; }
 .lane { pointer-events: stroke; cursor: pointer; }
 .lane path { fill: none; stroke: var(--c); stroke-width: 3; stroke-linecap: round; transition: stroke-width var(--dur-fast) ease; }
 .lane.idle path, .lane.nogit path { stroke-dasharray: 6 5; }
 .lane.unpushed path.lane-line { stroke-dasharray: 6 5; }
 .lane path.hint { stroke-width: 2; stroke-dasharray: 3 4; }
+/* Seta "volta para a base" do PR aberto: sólida, senão o tracejado a parte em pedaços. */
+.lane path.up { stroke-width: 2; stroke-dasharray: none; stroke-linejoin: round; }
 .lane circle, .lane rect { pointer-events: all; }
 .lane circle.commit { fill: var(--bt-color-surface); stroke: var(--c); stroke-width: 2.5; }
 .lane circle.on-main { fill: var(--c); stroke: var(--bt-color-surface); stroke-width: 2; }
