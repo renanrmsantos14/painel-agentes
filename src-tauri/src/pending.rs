@@ -322,14 +322,12 @@ fn scan_worktree(h: &RepoHead, wt: &Wt) -> Vec<Pending> {
 /// Repositórios conhecidos: pastas dos chats + subpastas com Git em Desktop\vscode e Desktop\Projetos.
 pub fn repos(chat_dirs: &[String]) -> Vec<String> {
     let mut dirs: Vec<String> = chat_dirs.to_vec();
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        for sub in ["vscode", "Projetos"] {
-            let root = PathBuf::from(&home).join("Desktop").join(sub);
-            if let Ok(entries) = std::fs::read_dir(root) {
-                for e in entries.flatten() {
-                    if e.path().join(".git").exists() {
-                        dirs.push(e.path().to_string_lossy().to_string());
-                    }
+    // Pastas das configurações; por padrão Desktop\vscode e Desktop\Projetos.
+    for root in crate::settings::get().roots {
+        if let Ok(entries) = std::fs::read_dir(PathBuf::from(root)) {
+            for e in entries.flatten() {
+                if e.path().join(".git").exists() {
+                    dirs.push(e.path().to_string_lossy().to_string());
                 }
             }
         }

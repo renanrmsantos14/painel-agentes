@@ -29,22 +29,9 @@
           <button id="refresh" class="icon-btn" title="Atualizar agora (F5)" aria-label="Atualizar agora">
             <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
           </button>
-          <details class="menu prefs">
-            <summary class="icon-btn" title="Preferências" aria-label="Preferências">
-              <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h4M12 12h8M4 17h12M20 17h0"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="17" r="2"/></svg>
-            </summary>
-            <div class="menu-panel">
-              <div class="menu-label">Agente</div>
-              <div class="seg" id="agent" role="radiogroup" aria-label="Agente">
-                <button role="radio" data-v="all" class="on">Todos</button>
-                <button role="radio" data-v="claude"><i class="dot claude"></i>Claude</button>
-                <button role="radio" data-v="codex"><i class="dot codex"></i>Codex</button>
-              </div>
-              <hr />
-              <label class="toggle"><input id="archived" type="checkbox" /><span>Mostrar chats arquivados</span></label>
-              <label class="toggle"><input id="autostart" type="checkbox" /><span>Iniciar com o Windows<small>Abre na bandeja, para os avisos funcionarem</small></span></label>
-            </div>
-          </details>
+          <button id="settings" class="icon-btn" title="Configurações" aria-label="Abrir configurações">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
         </div>
       </header>
 
@@ -56,6 +43,7 @@
     <div id="ctx" class="ctx" role="menu" aria-label="Ações"></div>
     <div id="modal" class="overlay" hidden></div>
     <div id="toast" class="toast" role="status"></div>
+    <div id="settings-root"></div>
     <div id="version" class="version" aria-hidden="true"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -107,42 +107,15 @@ h1 { margin: 0; font: 400 26px/1.08 var(--font-centabel-book); letter-spacing: -
 .search input::placeholder { color: var(--bt-color-text-secondary); }
 .search svg { width: 18px; height: 18px; }
 
-.seg { display: flex; padding: 3px; gap: 2px; height: 40px; background: var(--bt-color-surface-neutral); border: 1px solid var(--bt-color-border); border-radius: 10px; }
-.seg button {
-  display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--bt-color-text-primary);
-  padding: 0 12px; border-radius: 8px; font-weight: 600; font-size: 12px; transition: background .15s, color .15s;
-}
-@media (hover: hover) and (pointer: fine) { .seg button:hover { background: var(--bt-color-surface-soft); } }
-.seg button.on { background: var(--bt-color-brand); color: #fff; font-weight: 700; }
 .dot { width: 8px; height: 8px; display: inline-block; flex: none; }
 .dot.claude { background: var(--bt-color-brand); border-radius: 50%; }
 .dot.codex { background: var(--bt-color-action); border-radius: 2px; }
 .dot.git { border: 2px solid var(--bt-color-text-tertiary); border-radius: 50%; }
-.seg button.on .dot { background: #fff; }
 
 /* Filtros usam o Select do Design System (src/select.ts); aqui só a largura de cada um. */
 .sel-project { width: 200px; }
 .sel-days { width: 110px; }
 
-/* Menu de preferências: ações raras saem da barra principal */
-.menu { position: relative; }
-.menu summary { list-style: none; }
-.menu summary::-webkit-details-marker { display: none; }
-.menu[open] summary { background: var(--bt-color-surface-soft); border-color: var(--bt-color-text-tertiary); }
-.menu-panel {
-  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: 300px; padding: 6px;
-  background: var(--bt-color-surface); border: 1px solid var(--bt-color-border); border-radius: 12px; box-shadow: var(--bt-shadow-popover);
-  transform-origin: top right; animation: pop var(--dur-fast) var(--ease-out);
-}
-@keyframes pop { from { opacity: 0; transform: scale(.96); } }
-.toggle { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 10px; border-radius: 8px; color: var(--bt-color-text-primary); font-weight: 600; font-size: 13px; cursor: pointer; user-select: none; }
-@media (hover: hover) and (pointer: fine) { .toggle:hover { background: var(--bt-color-surface-soft); } }
-.toggle input { accent-color: var(--bt-color-action); margin: 0; width: 16px; height: 16px; flex: none; }
-.menu-label { padding: 6px 10px 4px; font: 800 11px/1.27 var(--font-sans); letter-spacing: .8px; text-transform: uppercase; color: var(--bt-color-text-secondary); }
-.menu-panel .seg { margin: 0 6px 6px; }
-.menu-panel .seg button { flex: 1; justify-content: center; }
-.menu-panel hr { border: 0; border-top: 1px solid var(--bt-color-border); margin: 4px 0; }
-.toggle small { display: block; font-size: 12px; font-weight: 500; color: var(--bt-color-text-secondary); }
 
 /* Chips de estado: resumo e filtro ao mesmo tempo */
 .chips { grid-area: chips; display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 26px 0; }
@@ -391,3 +364,19 @@ h1 { margin: 0; font: 400 26px/1.08 var(--font-centabel-book); letter-spacing: -
 .ctx-label { padding: 8px 10px 2px; font: 800 11px/1.27 var(--font-sans); letter-spacing: .8px; text-transform: uppercase; color: var(--bt-color-text-tertiary); }
 .ctx { max-width: 340px; }
 .ctx button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Configurações (src/settings.tsx): conteúdo da gaveta do Design System. */
+.set-body { display: grid; gap: 16px; padding-top: 16px; }
+.set-section { display: grid; gap: 12px; padding: 16px; background: var(--bt-color-surface); border: 1px solid var(--bt-color-border); border-radius: 12px; }
+.set-eyebrow { margin: 0; font: 800 11px/1.27 var(--font-sans); letter-spacing: .8px; text-transform: uppercase; color: var(--bt-color-text-secondary); }
+.set-stack { display: grid; gap: 14px; }
+.set-hint { margin: 0; font-size: 12px; line-height: 1.42; color: var(--bt-color-text-secondary); }
+.set-version { margin: 0; font-size: 13px; color: var(--bt-color-text-primary); font-variant-numeric: tabular-nums; }
+.set-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.set-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--bt-color-border); border-radius: 10px; background: var(--bt-color-surface-neutral); }
+.set-list li { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 4px 6px 4px 12px; }
+.set-list li + li { border-top: 1px solid var(--bt-color-border); }
+.set-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 12px/1.4 var(--font-mono); color: var(--bt-color-text-control); }
+.set-add { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+.set-add > :last-child { margin-top: 22px; }
+@media (max-width: 560px) { .set-add { grid-template-columns: 1fr; } .set-add > :last-child { margin-top: 0; } }

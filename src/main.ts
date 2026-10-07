@@ -2,9 +2,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { createSelect } from './select'
+import { mountSettings, updates } from './settings'
 
-declare const __APP_VERSION__: string
-declare const __BUILD_DATE__: string
 
 type Agent = 'claude' | 'codex' | 'git'
 type Pr = { number: number; url: string; state: string }
@@ -62,7 +61,6 @@ const qInput = $<HTMLInputElement>('q')
 const projectSel = createSelect($('project'), { label: 'Projeto', placeholder: 'Todos os projetos', onChange: (v) => { ui.project = v; persist(); render() } })
 const daysSel = createSelect($('days'), { label: 'Período', searchable: false, clearable: false, onChange: (v) => { ui.days = Number(v); persist(); void load() } })
 daysSel.setOptions([3, 7, 30, 90].map((d) => ({ value: String(d), label: `${d} dias` })))
-const archivedChk = $<HTMLInputElement>('archived')
 const refreshBtn = $<HTMLButtonElement>('refresh')
 const summaryEl = $<HTMLElement>('summary')
 
@@ -531,7 +529,6 @@ function render() {
 function clearFilters() {
   ui.q = ''; qInput.value = ''
   ui.focus = 'pending'; ui.agent = 'all'; ui.project = ''
-  syncAgent()
   projectSel.setValue('')
   persist(); render()
 }
@@ -853,13 +850,9 @@ $<HTMLElement>('status').addEventListener('click', (ev) => {
   ui.focus = b.dataset.focus as Focus
   persist(); render()
 })
-// Menu de preferências fecha ao clicar fora ou com Esc.
-const prefs = document.querySelector<HTMLDetailsElement>('.prefs')!
-document.addEventListener('pointerdown', (ev) => { if (prefs.open && !prefs.contains(ev.target as Node)) prefs.open = false })
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return
   if (!modal.hidden) { closeModal(); return }
-  if (prefs.open) { prefs.open = false; prefs.querySelector('summary')!.focus() }
 })
 
 board.addEventListener('click', (ev) => {
@@ -902,63 +895,41 @@ qInput.addEventListener('input', () => {
   cancelAnimationFrame(typing)
   typing = requestAnimationFrame(() => render())
 })
-function syncAgent() {
-  document.querySelectorAll<HTMLButtonElement>('#agent button').forEach((x) => {
-    x.classList.toggle('on', x.dataset.v === ui.agent)
-    x.setAttribute('aria-checked', String(x.dataset.v === ui.agent))
-  })
-}
-document.querySelectorAll<HTMLButtonElement>('#agent button').forEach((b) => {
-  b.addEventListener('click', () => { ui.agent = b.dataset.v!; syncAgent(); persist(); render() })
-})
-syncAgent()
 daysSel.setValue(String(ui.days))
-archivedChk.checked = ui.archived
-archivedChk.addEventListener('change', () => { ui.archived = archivedChk.checked; persist(); void load() })
 refreshBtn.addEventListener('click', () => void load(true))
 
-// ---------- Atualização do app (GitHub Releases) ----------
-const updBtn = $<HTMLButtonElement>('update')
-let updating = false
-async function checkUpdate() {
-  if (!IN_TAURI || updating) return
-  try {
-    const u = await invoke<{ version: string } | null>('check_update')
-    updBtn.hidden = !u
-    if (u) updBtn.textContent = `Atualizar para v${u.version}`
-  } catch { /* sem internet: tenta de novo mais tarde */ }
-}
-updBtn.addEventListener('click', async () => {
-  if (updating) return
-  updating = true
-  updBtn.disabled = true
-  updBtn.textContent = 'Baixando…'
-  try {
-    await invoke('install_update')
-  } catch (e) {
-    toast(String(e), true)
-    updating = false
-    updBtn.disabled = false
-    void checkUpdate()
-  }
+// ---------- Configurações e atualização ----------
+const openSettings = mountSettings($('settings-root'), {
+  view: () => ({ agent: ui.agent, days: ui.days, archived: ui.archived }),
+  applyView: (v) => {
+    const reload = v.days !== ui.days || v.archived !== ui.archived
+    Object.assign(ui, v)
+    daysSel.setValue(String(ui.days))
+    persist()
+    if (reload) void load()
+    else render()
+  },
+  afterSave: () => void loadPending(true),
+  toast,
 })
-if (IN_TAURI) {
-  void listen<number>('update-progress', (e) => { updBtn.textContent = e.payload >= 100 ? 'Instalando…' : `Baixando ${e.payload}%` })
-  setTimeout(() => void checkUpdate(), 5_000)
-  setInterval(() => void checkUpdate(), 4 * 3_600_000)
-}
+$<HTMLButtonElement>('settings').addEventListener('click', () => openSettings())
 
-const autoChk = $<HTMLInputElement>('autostart')
-if (IN_TAURI) {
-  void invoke<boolean>('get_autostart').then((on) => (autoChk.checked = on))
-  void listen('pending-updated', () => void loadPending())
-}
-autoChk.addEventListener('change', async () => {
-  try {
-    await invoke('set_autostart', { on: autoChk.checked })
-    toast(autoChk.checked ? 'O painel vai iniciar com o Windows, na bandeja' : 'Não inicia mais com o Windows')
-  } catch (e) { autoChk.checked = !autoChk.checked; toast(String(e), true) }
+// Botão do topo: aparece quando há versão nova e segue o download.
+const updBtn = $<HTMLButtonElement>('update')
+updates.subscribe(() => {
+  const u = updates.get()
+  updBtn.hidden = !['available', 'downloading', 'installing'].includes(u.s)
+  updBtn.disabled = u.s !== 'available'
+  updBtn.textContent = u.s === 'available' ? `Atualizar para v${u.version}` : u.s === 'downloading' ? `Baixando ${u.pct}%` : 'Instalando…'
+  if (u.s === 'error' && u.version) toast(u.msg, true)
 })
+updBtn.addEventListener('click', () => void updates.install())
+if (IN_TAURI) {
+  setTimeout(() => void updates.check(true), 5_000)
+  setInterval(() => void updates.check(true), 4 * 3_600_000)
+  void listen('pending-updated', () => void loadPending())
+  void listen('open-settings', () => openSettings())
+}
 /** Janela na bandeja ou minimizada não precisa atualizar a tela (o aviso do Windows segue pelo backend). */
 const appWin = IN_TAURI ? getCurrentWindow() : null
 async function onScreen() {

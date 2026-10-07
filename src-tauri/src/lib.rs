@@ -1,5 +1,6 @@
 mod cache;
 mod pending;
+mod settings;
 mod watch;
 
 use rusqlite::{Connection, OpenFlags};
@@ -729,6 +730,16 @@ fn set_autostart(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     if on { a.enable() } else { a.disable() }.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_settings() -> settings::Settings {
+    settings::get()
+}
+
+#[tauri::command]
+fn save_settings(value: settings::Settings) -> Result<settings::Settings, String> {
+    settings::save(value)
+}
+
 // ---------- Atualização pelo GitHub Releases (renanrmsantos14/painel-agentes) ----------
 // Só baixa quando a pessoa clica em "Atualizar agora"; o instalador roda em silêncio e reabre o app.
 
@@ -780,7 +791,8 @@ fn kind_text(p: &pending::Pending) -> String {
     }
 }
 
-/// Verifica as pendências periodicamente e avisa pelo Windows o que está parado há mais de 1 dia.
+/// Verifica as pendências periodicamente e avisa pelo Windows o que está parado há mais dias que o
+/// configurado (padrão 1). Com os avisos desligados nas configurações, só pula a notificação.
 /// Cada pendência é avisada no máximo uma vez por dia (registro em avisos.json na pasta do app).
 fn watcher(app: tauri::AppHandle) {
     use tauri::{Emitter, Manager};
@@ -791,6 +803,8 @@ fn watcher(app: tauri::AppHandle) {
         loop {
             let items = pending_cached(PENDING_TTL_MS);
             let now = now_ms();
+            let cfg = settings::get();
+            let after = cfg.notify_after_days * DAY_MS;
             let mut sent: HashMap<String, i64> = file
                 .as_ref()
                 .and_then(|f| std::fs::read_to_string(f).ok())
@@ -798,7 +812,7 @@ fn watcher(app: tauri::AppHandle) {
                 .unwrap_or_default();
             let due: Vec<&pending::Pending> = items
                 .iter()
-                .filter(|p| p.kind != "cleanup" && now - p.last_activity > DAY_MS && now - sent.get(&p.key).copied().unwrap_or(0) > DAY_MS)
+                .filter(|p| cfg.notify && p.kind != "cleanup" && now - p.last_activity > after && now - sent.get(&p.key).copied().unwrap_or(0) > DAY_MS)
                 .collect();
             if !due.is_empty() {
                 let mut body: Vec<String> = due.iter().take(3).map(|p| format!("{} · {} — {}", p.project, p.branch, kind_text(p))).collect();
@@ -851,14 +865,15 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
-        .invoke_handler(tauri::generate_handler![list_runs, list_pending, open_run, open_folder, open_link, open_editor, remove_worktree, get_autostart, set_autostart, check_update, install_update])
+        .invoke_handler(tauri::generate_handler![list_runs, list_pending, open_run, open_folder, open_link, open_editor, remove_worktree, get_autostart, set_autostart, get_settings, save_settings, check_update, install_update])
         .setup(move |app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
             use tauri::Manager;
             let show = MenuItem::with_id(app, "show", "Abrir painel", true, None::<&str>)?;
+            let settings = MenuItem::with_id(app, "settings", "Configurações", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &settings, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().expect("ícone do app"))
                 .tooltip("Painel Agentes")
@@ -866,6 +881,11 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "show" => show_main(app),
+                    "settings" => {
+                        use tauri::Emitter;
+                        show_main(app);
+                        let _ = app.emit("open-settings", ());
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -875,7 +895,11 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            if minimized {
+            if let Ok(dir) = app.path().app_data_dir() {
+                settings::init(dir.join("settings.json"));
+            }
+            // O Windows sempre abre com --minimized; a configuração decide se fica na bandeja.
+            if minimized && settings::get().start_minimized {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }
