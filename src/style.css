@@ -158,8 +158,9 @@ h1 { margin: 0; font: 400 26px/1.08 var(--font-centabel-book); letter-spacing: -
 .legend span { display: flex; align-items: center; gap: 6px; }
 .legend svg { width: 22px; height: 14px; }
 
+/* O sticky conta a partir do padding do .board (12px): o -12px cola o eixo no topo real, sem linhas aparecendo acima. */
 .axis {
-  position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: var(--label-w) 1fr; height: 36px;
+  position: sticky; top: -12px; z-index: 3; display: grid; grid-template-columns: var(--label-w) 1fr; height: 36px;
   background: var(--bt-color-surface-neutral); border-bottom: 1px solid var(--bt-color-border); border-radius: 0;
 }
 .axis-lbl, .tick, .now { font: 800 11px/1.27 var(--font-sans); letter-spacing: .8px; text-transform: uppercase; color: var(--bt-color-text-secondary); }
@@ -298,6 +299,8 @@ h1 { margin: 0; font: 400 26px/1.08 var(--font-centabel-book); letter-spacing: -
 .lbl .more svg { width: 16px; height: 16px; }
 .lbl .more circle { fill: currentColor; stroke: none; }
 .trow:is(.hl, :hover, :focus-within, :focus-visible) .more { opacity: 1; }
+/* Com o botão visível, o nome da branch encolhe e o selo de estado não fica por baixo dele. */
+.trow:is(.hl, :hover, :focus-within, :focus-visible) .lbl-top { padding-right: 30px; }
 @media (hover: hover) and (pointer: fine) { .lbl .more:hover { color: var(--bt-color-text-primary); border-color: var(--bt-color-text-tertiary); } }
 .lbl .stale { color: var(--danger); font-weight: 700; flex: none; }
 .trow.head .proj-count { margin-right: 0; }

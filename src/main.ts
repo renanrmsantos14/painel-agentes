@@ -345,8 +345,10 @@ function project(name: string, list: Run[], from: number, to: number, width: num
     const s = statusOf(r)
     const y = ROW * (i + 1) + ROW / 2
     const live = Date.now() - r.updatedAt < ACTIVE_MS && !r.orphan
-    const x0 = x(r.createdAt)
-    const x1 = Math.max(x(live ? to : r.updatedAt), x0 + R * 2 + 12)
+    // A faixa precisa de espaço para as duas curvas; perto de "hoje" ela recua a saída em vez de passar da borda.
+    const span = R * 2 + 12
+    const x1 = Math.min(x(to), Math.max(x(live ? to : r.updatedAt), x(r.createdAt) + span))
+    const x0 = Math.min(x(r.createdAt), x1 - span)
     const st = STATUS[s]
     const c = st.color
     const g = r.git
