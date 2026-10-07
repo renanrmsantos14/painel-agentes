@@ -4,7 +4,6 @@ import './react-global'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { createRoot } from 'react-dom/client'
 import B from './vendor/betinhos-ui.js'
 
 const { Drawer, Dialog, Tabs, Checkbox, SegmentedControl, Field, Input, Button, Alert, Progress } = B
@@ -15,7 +14,7 @@ export type View = { agent: string; days: number; archived: boolean }
 type Backend = { startMinimized: boolean; notify: boolean; notifyAfterDays: number; roots: string[] }
 type Draft = Backend & View & { autostart: boolean }
 export type Tab = 'geral' | 'exibicao' | 'avisos' | 'pastas' | 'atualizacao'
-type Bridge = { view: () => View; applyView: (v: View) => void; afterSave: () => void; toast: (msg: string, error?: boolean) => void }
+export type Bridge = { view: () => View; applyView: (v: View) => void; afterSave: () => void; toast: (msg: string, error?: boolean) => void }
 
 // ---------- Estado da atualização, compartilhado com o botão do topo ----------
 export type UpdateState =
@@ -184,7 +183,7 @@ const TABS: { value: Tab; label: string }[] = [
   { value: 'pastas', label: 'Pastas' }, { value: 'atualizacao', label: 'Atualização' },
 ]
 
-function Settings({ bridge, req }: { bridge: Bridge; req: { tab: Tab; n: number } | null }) {
+export function Settings({ bridge, req }: { bridge: Bridge; req: { tab: Tab; n: number } | null }) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<Tab>('geral')
   const [initial, setInitial] = useState<Draft | null>(null)
@@ -254,11 +253,4 @@ function Settings({ bridge, req }: { bridge: Bridge; req: { tab: Tab; n: number 
       </Dialog>
     </>
   )
-}
-
-/** Monta a gaveta uma vez; devolve a função que a abre (opcionalmente numa aba). */
-export function mountSettings(host: HTMLElement, bridge: Bridge) {
-  const root = createRoot(host)
-  let n = 0
-  return (tab: Tab = 'geral') => root.render(<Settings bridge={bridge} req={{ tab, n: ++n }} />)
 }
