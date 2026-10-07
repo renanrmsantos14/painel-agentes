@@ -59,9 +59,8 @@ const ICON = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const board = $<HTMLElement>('board')
 const qInput = $<HTMLInputElement>('q')
-const projectSel = createSelect($('project'), { label: 'Projeto', onChange: (v) => { ui.project = v; persist(); render() } })
-const daysSel = createSelect($('days'), { label: 'Período', searchable: false, onChange: (v) => { ui.days = Number(v); persist(); void load() } })
-projectSel.setOptions([{ value: '', label: 'Todos os projetos' }])
+const projectSel = createSelect($('project'), { label: 'Projeto', placeholder: 'Todos os projetos', onChange: (v) => { ui.project = v; persist(); render() } })
+const daysSel = createSelect($('days'), { label: 'Período', searchable: false, clearable: false, onChange: (v) => { ui.days = Number(v); persist(); void load() } })
 daysSel.setOptions([3, 7, 30, 90].map((d) => ({ value: String(d), label: `${d} dias` })))
 const archivedChk = $<HTMLInputElement>('archived')
 const refreshBtn = $<HTMLButtonElement>('refresh')
@@ -219,7 +218,7 @@ function renderChips(list: Run[]) {
 function renderProjects() {
   const names = [...new Set([...runs, ...orphans].map(projectOf))].sort((a, b) => a.localeCompare(b, 'pt-BR'))
   if (ui.project && !names.includes(ui.project)) names.unshift(ui.project)
-  projectSel.setOptions([{ value: '', label: 'Todos os projetos' }, ...names.map((n) => ({ value: n, label: n }))])
+  projectSel.setOptions([...names.map((n) => ({ value: n, label: n }))])
   projectSel.setValue(ui.project)
 }
 
