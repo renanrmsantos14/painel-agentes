@@ -173,6 +173,7 @@ fn dirty(dir: &str) -> (u32, i64) {
 pub(crate) struct Wt {
     path: String,
     branch: Option<String>,
+    locked: bool,
 }
 
 fn worktrees(repo: &str) -> Arc<Vec<Wt>> {
@@ -191,6 +192,7 @@ fn worktrees_fresh(dir: &str) -> Vec<Wt> {
         let mut path = None;
         let mut branch = None;
         let mut prunable = false;
+        let mut locked = false;
         for l in block.lines() {
             if let Some(p) = l.strip_prefix("worktree ") {
                 path = Some(p.replace('/', "\\"));
@@ -198,11 +200,13 @@ fn worktrees_fresh(dir: &str) -> Vec<Wt> {
                 branch = Some(b.to_string());
             } else if l.starts_with("prunable") || l == "bare" {
                 prunable = true;
+            } else if l.starts_with("locked") {
+                locked = true;
             }
         }
         if let (Some(path), false) = (path, prunable) {
             if Path::new(&path).is_dir() {
-                list.push(Wt { path, branch });
+                list.push(Wt { path, branch, locked });
             }
         }
     }
@@ -392,18 +396,29 @@ pub fn scan(chat_dirs: &[String], now: i64) -> (Vec<Pending>, Vec<(String, Strin
     (list, roots)
 }
 
-/// Remove um worktree só quando nada se perde: pasta limpa e branch já mesclada na base.
-/// Usa `git worktree remove` sem `--force` (o Git ainda recusa se achar algo não salvo) e mantém a branch.
+/// Pasta (dentro do .git do repositório) para onde vão os worktrees removidos até serem apagados em segundo plano.
+const TRASH: &str = "painel-lixo";
+
+/// Remove um worktree só quando nada se perde: pasta limpa e branch já mesclada na base. Mantém a branch.
+/// Apagar node_modules e target arquivo por arquivo (`git worktree remove`) leva minutos; por isso a pasta é
+/// movida para o lixo do repositório (instantâneo, mesmo volume), o registro do worktree é desfeito e a
+/// exclusão física roda em segundo plano.
 pub fn remove_worktree(path: &str) -> Result<(), String> {
     if !Path::new(path).is_dir() {
         return Err("A pasta do worktree não existe mais".into());
     }
-    let common = git(path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok_or("A pasta não é um repositório Git")?;
-    let repo = Path::new(&common).parent().map(|p| p.to_string_lossy().replace('/', "\\")).ok_or("Repositório não encontrado")?;
+    // Uma chamada só: pasta comum do repositório e pasta administrativa do worktree (.git/worktrees/<nome>).
+    let dirs = git(path, &["rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir"]).ok_or("A pasta não é um repositório Git")?;
+    let mut dirs = dirs.lines();
+    let (Some(common), Some(admin)) = (dirs.next(), dirs.next()) else { return Err("A pasta não é um repositório Git".into()) };
+    let repo = Path::new(common).parent().map(|p| p.to_string_lossy().replace('/', "\\")).ok_or("Repositório não encontrado")?;
     if same_path(path, &repo) {
         return Err("Esta é a pasta principal do repositório, não um worktree".into());
     }
     let wt = worktrees_fresh(&repo).into_iter().find(|w| same_path(&w.path, path)).ok_or("A pasta não está na lista de worktrees do repositório")?;
+    if wt.locked {
+        return Err("O worktree está travado (git worktree lock)".into());
+    }
     let branch = wt.branch.ok_or("Worktree sem branch (detached): remova manualmente")?;
     // Decisão de apagar pasta: lê status e refs frescos, sem depender do cache.
     cache::STATUS.invalidate(path);
@@ -416,14 +431,60 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
     if branch == base || unmerged(path, &base, &branch).0 > 0 {
         return Err(format!("A branch {branch} ainda tem commits fora da {base}"));
     }
-    let out = crate::git_cmd(&repo, &["worktree", "remove", path]).output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!("O Git recusou remover: {}", String::from_utf8_lossy(&out.stderr).trim()));
+
+    // A pasta administrativa só é apagada se estiver mesmo em .git/worktrees.
+    let admin = PathBuf::from(admin);
+    let common = PathBuf::from(common);
+    if !admin.parent().is_some_and(|p| same_path(&p.to_string_lossy(), &common.join("worktrees").to_string_lossy())) {
+        return Err("Pasta administrativa do worktree fora do lugar esperado".into());
     }
-    REFS.invalidate(&repo);
-    WORKTREES.invalidate(&repo);
-    cache::STATUS.invalidate(path);
+    // Os caches do repositório ficam velhos depois da remoção.
+    let forget = || {
+        REFS.invalidate(&repo);
+        WORKTREES.invalidate(&repo);
+        cache::STATUS.invalidate(path);
+    };
+
+    let trash = common.join(TRASH);
+    let _ = std::fs::create_dir_all(&trash);
+    let name = Path::new(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "wt".into());
+    let stamp = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let dest = trash.join(format!("{name}-{stamp}"));
+    if let Err(e) = std::fs::rename(path, &dest) {
+        // Outro volume (ERROR_NOT_SAME_DEVICE): sem atalho, o Git apaga do jeito lento.
+        if e.raw_os_error() == Some(17) {
+            let out = crate::git_cmd(&repo, &["worktree", "remove", path]).output().map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(format!("O Git recusou remover: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            }
+            forget();
+            return Ok(());
+        }
+        return Err(format!("A pasta está em uso por outro programa (terminal, editor ou servidor): {e}"));
+    }
+    if std::fs::remove_dir_all(&admin).is_err() {
+        let _ = crate::git_cmd(&repo, &["worktree", "prune"]).output();
+    }
+    empty_trash(trash);
+    forget();
     Ok(())
+}
+
+/// Apaga em segundo plano o conteúdo do lixo do repositório (inclui sobras de execuções anteriores).
+/// A pasta do lixo em si fica, para não atrapalhar outra remoção movendo para ela ao mesmo tempo.
+/// `rd /s /q` é bem mais rápido que apagar arquivo por arquivo e não segue junctions (pnpm).
+fn empty_trash(trash: PathBuf) {
+    std::thread::spawn(move || {
+        for e in std::fs::read_dir(&trash).into_iter().flatten().flatten() {
+            let p = e.path();
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("cmd").arg("/c").arg("rd").arg("/s").arg("/q").arg(&p).creation_flags(0x0800_0000).output();
+            }
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -462,6 +523,8 @@ mod tests {
         remove_worktree(&wt_s).unwrap();
         assert!(!wt.exists());
         sh(&repo, &["rev-parse", "--verify", "-q", "feat"]);
+        let list = Command::new("git").arg("-C").arg(&repo).args(["worktree", "list", "--porcelain"]).output().unwrap();
+        assert!(!String::from_utf8_lossy(&list.stdout).contains("feat"), "registro do worktree ficou para trás");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
