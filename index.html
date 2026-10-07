@@ -7,44 +7,7 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="top">
-        <div class="brand">
-          <div class="logo" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="12" r="2.4"/><path d="M6 8.4v7.2M8.2 6.9c4.6.4 7.6 1.9 7.9 3.4"/></svg>
-          </div>
-          <div>
-            <h1>Painel Agentes</h1>
-            <p id="summary" class="sub">Lendo chats e repositórios…</p>
-          </div>
-        </div>
-        <div class="controls">
-          <label class="search">
-            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
-            <input id="q" type="search" placeholder="Buscar chat, projeto ou branch" autocomplete="off" />
-          </label>
-          <div id="project" class="sel-project"></div>
-          <div id="days" class="sel-days"></div>
-          <button id="update" class="update-btn" hidden></button>
-          <button id="refresh" class="icon-btn" title="Atualizar agora (F5)" aria-label="Atualizar agora">
-            <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
-          </button>
-          <button id="settings" class="icon-btn" title="Configurações" aria-label="Abrir configurações">
-            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </button>
-        </div>
-      </header>
-
-      <nav id="status" class="chips" aria-label="Foco"></nav>
-      <main id="board" class="board" aria-live="polite"></main>
-    </div>
-
-    <div id="tip" class="tip" aria-hidden="true"></div>
-    <div id="ctx" class="ctx" role="menu" aria-label="Ações"></div>
-    <div id="modal" class="overlay" hidden></div>
-    <div id="toast" class="toast" role="status"></div>
-    <div id="settings-root"></div>
-    <div id="version" class="version" aria-hidden="true"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
