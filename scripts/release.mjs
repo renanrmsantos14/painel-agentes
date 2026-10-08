@@ -1,6 +1,7 @@
 // Publica uma versão nova no GitHub Releases (renanrmsantos14/painel-agentes):
 // incrementa o PATCH, compila o instalador assinado, gera latest.json e cria a release.
-// A chave de assinatura fica fora do repositório, em ~/.tauri/painel-agentes.key.
+// A chave de assinatura fica fora do repositório: no CI vem do secret TAURI_SIGNING_PRIVATE_KEY,
+// na máquina local de ~/.tauri/painel-agentes.key.
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -8,14 +9,15 @@ import { join, resolve } from 'node:path'
 
 const REPO = 'renanrmsantos14/painel-agentes'
 const keyPath = join(homedir(), '.tauri', 'painel-agentes.key')
-if (!existsSync(keyPath)) throw new Error(`Chave de assinatura não encontrada em ${keyPath}`)
+const key = process.env.TAURI_SIGNING_PRIVATE_KEY || (existsSync(keyPath) ? readFileSync(keyPath, 'utf8') : '')
+if (!key) throw new Error(`Chave de assinatura não encontrada (secret TAURI_SIGNING_PRIVATE_KEY ou ${keyPath})`)
 
 const run = (cmd, args, env = {}) => execFileSync(cmd, args, { stdio: 'inherit', env: { ...process.env, ...env }, shell: false })
 
 run(process.execPath, ['scripts/bump-version.mjs'])
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'))
 run(process.execPath, ['node_modules/@tauri-apps/cli/tauri.js', 'build'], {
-  TAURI_SIGNING_PRIVATE_KEY: readFileSync(keyPath, 'utf8'),
+  TAURI_SIGNING_PRIVATE_KEY: key,
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '',
 })
 
@@ -35,4 +37,8 @@ copyFileSync(join(dir, exe), join(dir, asset))
 
 run('gh', ['release', 'create', `v${version}`, join(dir, asset), join(dir, 'latest.json'),
   '--repo', REPO, '--title', `v${version}`, '--notes', `Painel Agentes v${version}`])
+// Grava a versão publicada na base; o prefixo "release:" impede o workflow de disparar de novo.
+run('git', ['add', 'package.json'])
+run('git', ['commit', '-m', `release: v${version}`])
+run('git', ['push', 'origin', 'HEAD:master'])
 console.log(`Publicada v${version}`)
