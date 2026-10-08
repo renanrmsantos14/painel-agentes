@@ -108,10 +108,25 @@ fn tip_time(refs: &HashMap<String, Ref>, branch: &str) -> i64 {
     refs.get(branch).map(|r| r.time).unwrap_or(0)
 }
 
+/// `unmerged` contra a base local e, se ela estiver atrás, contra a do GitHub (`origin/<base>`).
+/// O merge do PR acontece no GitHub: a base local só recebe esses commits no próximo pull.
+pub(crate) fn unmerged_cached(dir: &str, refs: &Refs, base: &str, branch: &str) -> (u32, Vec<String>) {
+    let tip = refs.heads.get(branch).map(|r| r.tip.as_str());
+    let local = unmerged_memo(dir, refs.heads.get(base).map(|r| r.tip.as_str()), tip, base, branch);
+    let remote = format!("origin/{base}");
+    match refs.remotes.get(&remote) {
+        Some(t) if local.0 > 0 && refs.heads.get(base).is_none_or(|b| b.tip != *t) => {
+            let r = unmerged_memo(dir, Some(t), tip, &remote, branch);
+            if r.0 == 0 { r } else { local }
+        }
+        _ => local,
+    }
+}
+
 /// `unmerged` com cache pelas pontas dos commits; sem as pontas, calcula direto.
-fn unmerged_cached(dir: &str, refs: &HashMap<String, Ref>, base: &str, branch: &str) -> (u32, Vec<String>) {
-    let (Some(b), Some(t)) = (refs.get(base), refs.get(branch)) else { return unmerged(dir, base, branch) };
-    let key = format!("{}|{}", b.tip, t.tip);
+fn unmerged_memo(dir: &str, base_tip: Option<&str>, tip: Option<&str>, base: &str, branch: &str) -> (u32, Vec<String>) {
+    let (Some(b), Some(t)) = (base_tip, tip) else { return unmerged(dir, base, branch) };
+    let key = format!("{b}|{t}");
     if let Some(hit) = UNMERGED.lock().unwrap().get(&key) {
         return hit.clone();
     }
@@ -288,7 +303,7 @@ fn scan_repo_head(repo: &str, now: i64) -> Option<(RepoHead, Vec<Pending>)> {
         if *b == base || with_worktree.contains(b.as_str()) || r.tip.is_empty() || now - r.time > BRANCH_MAX_AGE_DAYS * 86_400_000 {
             continue;
         }
-        let (ahead, commits) = unmerged_cached(repo, &all.heads, &base, b);
+        let (ahead, commits) = unmerged_cached(repo, &all, &base, b);
         if ahead > 0 {
             out.push(item("unmerged", &project, repo, &base, repo, b, ahead, r.time, commits, false));
         }
@@ -310,7 +325,7 @@ fn scan_worktree(h: &RepoHead, wt: &Wt) -> Vec<Pending> {
     if *b == h.base {
         return out;
     }
-    let (ahead, commits) = unmerged_cached(&wt.path, &h.refs.heads, &h.base, b);
+    let (ahead, commits) = unmerged_cached(&wt.path, &h.refs, &h.base, b);
     if ahead > 0 {
         out.push(item("unmerged", b, ahead, tip_time(&h.refs.heads, b), commits, !is_main));
     } else if n == 0 && !is_main {
@@ -426,7 +441,7 @@ pub fn remove_worktree(path: &str) -> Result<(), String> {
     let fresh = Arc::new(refs(&repo));
     REFS.put(&repo, fresh.clone());
     let base = base_of(&fresh).ok_or("Branch base não encontrada")?;
-    if branch == base || unmerged(path, &base, &branch).0 > 0 {
+    if branch == base || unmerged_cached(path, &fresh, &base, &branch).0 > 0 {
         return Err(format!("A branch {branch} ainda tem commits fora da {base}"));
     }
 

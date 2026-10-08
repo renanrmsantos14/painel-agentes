@@ -388,15 +388,16 @@ fn git_info(seed: &Seed, ctx: &Ctx) -> Option<GitInfo> {
 
     // Cache: commits e estatísticas só mudam quando as pontas da branch/base ou a janela da sessão mudam.
     let tip = |b: &str| refs.get(b).map(|r| r.tip.clone()).unwrap_or_default();
+    let remote = all.remotes.get(&format!("origin/{}", g.base)).cloned().unwrap_or_default();
     let key = format!(
-        "{dir}|{}|{}|{}|{}|{}|{}|{}",
+        "{dir}|{}|{}|{}|{}|{remote}|{}|{}|{}",
         g.branch, g.base, tip(&g.branch), tip(&g.base), seed.run.created_at, seed.run.updated_at,
         seed.run.prs.iter().map(|p| p.state.as_str()).collect::<String>()
     );
     if let Some(hit) = CACHE.lock().unwrap().get(&key) {
         return Some(GitInfo { dirty: g.dirty, worktree_missing: g.worktree_missing, ..hit.clone() });
     }
-    let g = expensive(dir, seed, g);
+    let g = expensive(dir, seed, g, &all);
     let mut cache = CACHE.lock().unwrap();
     // Chaves antigas (pontas de branch que já mudaram) não voltam a ser usadas: limpa para não crescer sem fim.
     if cache.len() > 2000 {
@@ -408,7 +409,7 @@ fn git_info(seed: &Seed, ctx: &Ctx) -> Option<GitInfo> {
 
 static CACHE: std::sync::LazyLock<Mutex<HashMap<String, GitInfo>>> = std::sync::LazyLock::new(Default::default);
 
-fn expensive(dir: &str, seed: &Seed, mut g: GitInfo) -> GitInfo {
+fn expensive(dir: &str, seed: &Seed, mut g: GitInfo, refs: &pending::Refs) -> GitInfo {
     let pr_merged = seed.run.prs.iter().any(|p| p.state.eq_ignore_ascii_case("MERGED"));
 
     if g.on_base {
@@ -478,6 +479,10 @@ fn expensive(dir: &str, seed: &Seed, mut g: GitInfo) -> GitInfo {
                 q.extend(files.iter().map(String::as_str));
                 g.merged = git_ok(dir, &q);
             }
+        }
+        // PR mesclado no GitHub com a base local ainda sem pull.
+        if g.ahead > 0 && !g.merged {
+            g.merged = pending::unmerged_cached(dir, refs, &g.base, &g.branch).0 == 0;
         }
     }
     g.merged |= pr_merged;
