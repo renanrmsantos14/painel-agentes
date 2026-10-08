@@ -162,12 +162,15 @@ export const FOCUS: { v: Focus; label: string; color: string; test: (s: Status) 
 /** Etiqueta curta: diz o próximo passo, não só o estado. */
 export function badgeText(r: Run, s: Status) {
   const g = r.git
-  const pr = r.prs.find((p) => p.url)
+  // O PR mais recente em cada estado (um chat pode abrir vários PRs).
+  const last = (state: string) => r.prs.filter((p) => p.url && p.state.toUpperCase() === state).at(-1)
   if (s === 'open') {
     if ((g?.dirty ?? 0) > 0 || pendCount(r, 'dirty')) return 'Falta commit'
+    const pr = last('OPEN')
     if (pr) return `PR #${pr.number} aberto`
     return 'Falta mesclar'
   }
+  const pr = last('MERGED')
   if (s === 'merged' && pr) return `Mesclado · PR #${pr.number}`
   return STATUS[s].label
 }
