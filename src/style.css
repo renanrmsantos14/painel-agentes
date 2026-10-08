@@ -214,7 +214,7 @@ h1 { margin: 0; font: 400 26px/1.08 var(--font-centabel-book); letter-spacing: -
 .graph text.pr-label { stroke: var(--bt-color-surface); stroke-width: 4px; stroke-linejoin: round; paint-order: stroke; }
 .lane { pointer-events: stroke; cursor: pointer; }
 .lane path { fill: none; stroke: var(--c); stroke-width: 3; stroke-linecap: round; transition: stroke-width var(--dur-fast) ease; }
-.lane.idle path, .lane.nogit path { stroke-dasharray: 6 5; }
+.lane.idle path, .lane.done path, .lane.nogit path { stroke-dasharray: 6 5; }
 .lane.unpushed path.lane-line { stroke-dasharray: 6 5; }
 .lane path.hint { stroke-width: 2; stroke-dasharray: 3 4; }
 /* Seta "volta para a base" do PR aberto: sólida, senão o tracejado a parte em pedaços. */

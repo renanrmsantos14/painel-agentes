@@ -98,9 +98,24 @@ export const pendCount = (r: Run, kind: Pending['kind']) => r.pend?.filter((p) =
 /** Atividade mais antiga entre as pendências do chat (para destacar o que está parado). */
 export const pendSince = (r: Run) => Math.min(...(r.pend ?? []).map((p) => p.lastActivity || Date.now()), Date.now())
 
-export type Status = 'need' | 'open' | 'merged' | 'main' | 'idle'
+export type Status = 'need' | 'open' | 'merged' | 'main' | 'idle' | 'done'
 
-function computeStatus(r: Run): Status {
+/** Baixas dadas pelo usuário: id da linha -> `updatedAt` no momento da baixa. Atividade nova reabre. */
+export type Dismissed = Record<string, number>
+
+export function loadDismissed(): Dismissed {
+  try { return JSON.parse(localStorage.getItem('baixas') ?? '{}') } catch { return {} }
+}
+export function saveDismissed(d: Dismissed) {
+  try { localStorage.setItem('baixas', JSON.stringify(d)) } catch { /* sem armazenamento */ }
+}
+
+function computeStatus(r: Run, dismissed: Dismissed): Status {
+  const s = baseStatus(r)
+  return (s === 'need' || s === 'open') && (dismissed[r.id] ?? -1) >= r.updatedAt ? 'done' : s
+}
+
+function baseStatus(r: Run): Status {
   const g = r.git
   if (r.needsAction && !r.archived && Date.now() - r.updatedAt < NEED_MS) return 'need'
   if (r.pend?.length) return 'open'
@@ -113,11 +128,11 @@ function computeStatus(r: Run): Status {
 }
 
 /** Classificador com memo: o mesmo chat é classificado várias vezes por renderização. */
-export function statusMemo() {
+export function statusMemo(dismissed: Dismissed = {}) {
   const memo = new WeakMap<Run, Status>()
   return (r: Run) => {
     let s = memo.get(r)
-    if (!s) memo.set(r, (s = computeStatus(r)))
+    if (!s) memo.set(r, (s = computeStatus(r, dismissed)))
     return s
   }
 }
@@ -130,15 +145,17 @@ export const STATUS: Record<Status, { label: string; color: string; soft: string
   merged: { label: 'Mesclado', color: 'var(--merged)', soft: 'var(--merged-soft)', text: 'var(--merged-text)' },
   main: { label: 'Direto na base', color: 'var(--merged)', soft: 'var(--merged-soft)', text: 'var(--merged-text)' },
   idle: { label: 'Sem mudanças', color: 'var(--idle)', soft: 'var(--idle-soft)', text: 'var(--idle-text)' },
+  done: { label: 'Com baixa', color: 'var(--idle)', soft: 'var(--idle-soft)', text: 'var(--idle-text)' },
 }
 
-export const RANK: Record<Status, number> = { need: 0, open: 1, main: 2, merged: 2, idle: 3 }
+export const RANK: Record<Status, number> = { need: 0, open: 1, main: 2, merged: 2, idle: 3, done: 3 }
 
-export type Focus = 'pending' | 'need' | 'open' | 'all'
+export type Focus = 'pending' | 'need' | 'open' | 'done' | 'all'
 export const FOCUS: { v: Focus; label: string; color: string; test: (s: Status) => boolean }[] = [
   { v: 'pending', label: 'Pendentes', color: 'var(--bt-color-brand)', test: (s) => s === 'need' || s === 'open' },
   { v: 'need', label: 'Precisa de você', color: 'var(--need)', test: (s) => s === 'need' },
   { v: 'open', label: 'Falta integrar', color: 'var(--progress)', test: (s) => s === 'open' },
+  { v: 'done', label: 'Com baixa', color: 'var(--idle)', test: (s) => s === 'done' },
   { v: 'all', label: 'Todos', color: 'var(--idle)', test: () => true },
 ]
 

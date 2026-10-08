@@ -10,7 +10,7 @@ import { ICON } from './icons'
 import {
   type Focus, type GitInfo, type Pending, type Run, type Status,
   ACTIVE_MS, FOCUS, IN_TAURI, PENDING_MS, RANK, REFRESH_MS,
-  ago, collapse, folderOf, isLive, link, np, plural, projectOf, request, statusMemo, ticks,
+  ago, collapse, folderOf, loadDismissed, saveDismissed, isLive, link, np, plural, projectOf, request, statusMemo, ticks,
 } from './model'
 import { type Item, type MenuReq, Menu, RemoveModal } from './Overlays'
 import { type Bridge, type Tab, Settings, updates } from './settings'
@@ -69,6 +69,7 @@ export function App() {
   const [ui, setUi] = useState(loadUi)
   const [runs, setRuns] = useState<Run[]>([])
   const [pendings, setPendings] = useState<Pending[]>([])
+  const [dismissed, setDismissed] = useState(loadDismissed)
   const [lastLoad, setLastLoad] = useState(0)
   const [now, setNow] = useState(Date.now)
   const [spin, setSpin] = useState(false)
@@ -186,7 +187,7 @@ export function App() {
   // ---------- Dados derivados ----------
   const linked = useMemo(() => link(runs, pendings), [runs, pendings])
   const { cleanups, unpushedBy } = linked
-  const statusOf = useMemo(() => statusMemo(), [linked, now])
+  const statusOf = useMemo(() => statusMemo(dismissed), [linked, now, dismissed])
 
   /** Chats e pendências sem chat que passam nos filtros de texto, agente e projeto (o foco é aplicado depois, para as contagens). */
   const all = useMemo(() => {
@@ -263,6 +264,18 @@ export function App() {
     setRemoving({ ok, skipped: ps.length - ok.length })
   }
 
+  /** Baixa vale para a linha e os chats agrupados nela; desfazer remove a marca. */
+  const setDone = (r: Run, done: boolean) => {
+    const next = { ...dismissed }
+    for (const x of [r, ...(r.others ?? [])]) {
+      if (done) next[x.id] = x.updatedAt
+      else delete next[x.id]
+    }
+    setDismissed(next)
+    saveDismissed(next)
+    toast(done ? 'Baixa dada: volta a aparecer se tiver atividade nova' : 'Baixa desfeita')
+  }
+
   function runItems(r: Run): Item[] {
     const items: Item[] = []
     const g = r.git
@@ -274,6 +287,9 @@ export function App() {
     if (g) items.push({ label: 'Copiar nome da branch', icon: ICON.copy, act: () => void copy(g.branch, `Copiado: ${g.branch}`) })
     const req = request(r, unpushedBy.get(projectOf(r)))
     if (req) items.push({ label: 'Copiar pedido para finalizar', icon: ICON.send, act: () => void copy(req, 'Pedido copiado: cole no chat do agente') })
+    const s = statusOf(r)
+    if (s === 'need' || s === 'open') items.push({ label: 'Dar baixa (não preciso mais)', icon: ICON.check, act: () => setDone(r, true) })
+    if (s === 'done') items.push({ label: 'Desfazer baixa', icon: ICON.check, act: () => setDone(r, false) })
     const wt = cleanups.find((p) => np(p.path) === np(r.cwd))
     if (wt) items.push({ label: 'Remover worktree mesclada', icon: ICON.trash, danger: true, act: () => confirmRemove([wt]) })
     return items
@@ -394,7 +410,7 @@ export function App() {
   const dayTicks = tk.map((t) => t.t)
   const visibleClean = cleanups.filter((p) => !ui.project || p.project === ui.project)
   const cleanLabel = `Limpar ${plural(visibleClean.length, 'worktree mesclada', 'worktrees mescladas')}`
-  const title = { pending: 'O que está pendente', need: 'Esperando sua resposta', open: 'Falta integrar na base', all: 'Todas as branches' }[ui.focus]
+  const title = { pending: 'O que está pendente', need: 'Esperando sua resposta', open: 'Falta integrar na base', done: 'Pendências com baixa', all: 'Todas as branches' }[ui.focus]
 
   const st = all.map(statusOf)
   const need = st.filter((s) => s === 'need').length
